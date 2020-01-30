@@ -1,0 +1,56 @@
+digraph G {
+
+
+	  ####  Node definitions  ####
+      
+      # Default Display
+      node                    [fontname = Helvetica, shape = rectangle, fontsize = 14]
+      
+      # Pipeline Steps
+      Import                  [label = 'Import Data']
+      Reshape                 [label = 'Clean and Reshape']
+      Resample                [label = 'Resample Rare Events']
+      model_diagnostics       [label = 'Model Diagnostics']
+      
+      # Data sources
+      survey_data             [label = 'Groundfish Catch Data', shape = oval]
+      catch_at_age            [label = 'Catch at Age Data', shape = oval]
+      station_sst             [label = 'SST at each Station', shape = oval]
+      regional_sst            [label = 'Regional Average SST', shape = oval]
+
+      #Cleaning Steps
+      one_hot                 [label = 'One-hot Encoding']
+      filtering               [label = 'Filtering Data']
+      species_selection       [label = 'Species Selection']
+      size_classes            [label = 'Set Size-class Ranges']
+
+      #Model Diagnostics
+      var_importance          [label = 'Variable Importance Plots']
+      maps                    [label = 'Spatial Predictions']
+      year_aggs               [label = 'Yearly Aggregates']
+      
+      
+    
+      # edge definitions with the node IDs
+      survey_data -> Import
+      catch_at_age -> Import
+      station_sst -> Import
+      regional_sst -> Import
+      
+      Import -> Reshape
+      one_hot -> Reshape
+      filtering -> Reshape
+      species_selection -> Reshape
+      size_classes -> Reshape
+
+      Reshape -> Resample
+      Resample -> model_diagnostics
+      var_importance -> model_diagnostics
+      maps -> model_diagnostics
+      year_aggs -> model_diagnostics
+
+
+
+      ;
+
+}

@@ -1,0 +1,45 @@
+digraph G {
+
+
+	  ####  Node definitions  ####
+      
+      # Default Display
+      node                    [fontname = Helvetica, shape = rectangle, fontsize = 14]
+      
+      # Pipeline Steps
+      Survey_dat              [label = 'Survey Data']
+      data_filtering          [label = 'Filtering Data']
+      size_classes            [label = 'Set Size-Classes']
+      stratum_weights         [label = 'Stratum-Area Weighting']
+      year_lags               [label = 'Set Yearly Time Lags']
+      sst_point_locations     [label = 'Adding SST for Trawl Stations']
+      landings_data           [label = 'Add Yearly Landings Data']
+      regional_sst            [label = 'Regional SST Averages']
+      oversampling            [label = 'Resampling Rare Events']
+      size_class_oversampling [label = 'Oversample Size Class']
+      model_setups            [label = 'Configure Models']
+      model_diagnostics       [label = 'Model Diagnostics']
+      
+     
+      # Data sources
+      groundfish_data         [label = 'Groundfish Catch Data', shape = oval]
+      catch_at_age            [label = 'Catch at Age Data', shape = oval]
+      
+      
+    
+      # edge definitions with the node IDs
+      Survey_dat              -> data_filtering 
+      groundfish_data         -> Survey_dat
+      data_filtering          -> size_classes
+      size_classes            -> stratum_weights
+      stratum_weights         -> year_lags
+      year_lags               -> sst_point_locations
+      sst_point_locations     -> landings_data
+      landings_data           -> regional_sst
+      catch_at_age            -> landings_data
+      regional_sst            -> oversampling
+      oversampling            -> size_class_oversampling
+      size_class_oversampling -> model_setups
+      model_setups            -> model_diagnostics;
+
+}

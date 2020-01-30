@@ -39,7 +39,7 @@ if(params$pc == TRUE) {
 
 #Helper Funs
 source(here("code/data_cleanup_funs.R"))
-plotsource(here("code/data_reshaping_funs.R"))
+source(here("code/data_reshaping_funs.R"))
 
 #GGplot theme
 theme_set(theme_bw())

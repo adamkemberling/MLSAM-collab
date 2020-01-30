@@ -39,7 +39,7 @@ if(params$pc == TRUE) {
 
 #Helper Funs
 source(here("code/data_cleanup_funs.R"))
-plotsource(here("code/data_reshaping_funs.R"))
+source(here("code/data_reshaping_funs.R"))
 
 #GGplot theme
 theme_set(theme_bw())
@@ -727,6 +727,21 @@ feat_stdevs<-scaling[2,]
 ```{r}
 ####  Load Model Prediction Data  ####
 # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+
+#Set appropriate path to box
+if(params$pc == TRUE) {
+  # MB setup
+
+  user.name <- params$user_name
+
+  res_path <- shared.path(os.use = "windows", group = "RES Data", folder = NULL)
+  
+} else {
+  
+  res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
+  
+}
+
 
 ####  Load Mapping Funs  ####
 source(here("Code", "mapping_predictions.R"))

@@ -7,7 +7,6 @@ library(gmRi)
 #mod_preds  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
 
 ####  Load Strata Shapefiles  ####
-res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
 survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))
 
 

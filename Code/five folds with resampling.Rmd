@@ -20,6 +20,8 @@ library(caret)
 library(UBL)
 library(sf)
 library(gmRi)
+library(vip)
+library(pdp)
 
 
 #Set appropriate path to box
@@ -523,10 +525,13 @@ test_labels <- as.matrix(test_labels)
 inputs <- layer_input(shape = dim(train_data)[2])
 
 # outputs are input + dense layers
-predictions <- inputs %>%
-  layer_dense(units = dim(train_data)[2], activation="relu") %>%
-  layer_dense(units = dim(train_data)[2], activation="relu") %>%
-  layer_dense(units = dim(train_labels)[2])
+predictions <- inputs%>%
+  layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
+  layer_dropout(0.2)%>%
+  layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
+  layer_dropout(0.2)%>%
+  layer_dense(units=dim(train_labels)[2])
+
 
 # create model
 model <- keras_model(inputs = inputs, outputs = predictions)
@@ -683,8 +688,39 @@ save_model_hdf5(object = model, filepath = here("model_runs", "onemodel.h5"))
 
 # save predictions
 write_csv(datdat, here("predictions20132015.csv"), col_names = TRUE)
+
+# save training labels and features after features have been scaled
+#write_csv(imbal,"training.csv")
+
+# save testing labels and features after features have been scaled
+#write_csv(bind_cols(test_labels,test_data),"testing.csv")
+
+# save scaling means and stdevs
+#write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
 ```
 
+```{r, eval = FALSE}
+# load saved model
+model<-load_model_hdf5(filepath="model_runs/onemodel.h5")
+
+# load predictions
+datdat<-read_csv("predictions20132015.csv",guess_max=7000)
+
+# load training
+training<-read_csv("training.csv")
+
+# load testing
+testing<-read_csv("testing.csv")
+
+# load scaling means and stdevs
+scaling<-read_csv("feature_means_stdevs.csv")
+
+# first row are means
+feat_mns<-scaling[1,]
+
+# second row are stdevs
+feat_stdevs<-scaling[2,]
+```
 
 # Strata Plots {.tabset .tabset-pills}
 
@@ -713,38 +749,36 @@ strata_diffs_plot(mod_summs_sf)
 
 
 
-# Variable importance plot
+# variable importance plot
 
 ```{r, eval = FALSE}
-library(vip)
-
 # from https://bgreenwell.github.io/pdp/articles/pdp-example-tensorflow.html
 
 # vip randomly permutes the values of each feature and records the drop in training performance
 
 # prediction function wrapper, two arguments: object (the fitted model) and newdata
 # The function needs to return a vector of predictions (one for each observation)
-pred_wrapper <- function(object, newdata){
-  predict(object, x = as.matrix(newdata))[,2] %>% # column 2 is medium size class
+pred_wrapper <- function(object,newdata){
+  predict(object,x=as.matrix(newdata))[,2]%>% # column 2 is medium size class
   as.vector()
 }
 
 # use training data prior to resampling
-orig_train_data <- imbal[, c(4:ncol(bal))]
-orig_train_labels <- imbal[, c(1,2,3)]
+orig_train_labels <- training[,c(1,2,3)]
+orig_train_data <- training[,c(4:ncol(training))]
 
 # log transform labels
-orig_train_labels <- log(orig_train_labels+1)
+orig_train_labels<-log(orig_train_labels+1)
 
 # permutation-based VIP for the fitted network
-p1 <- vip(object = model,                        # fitted model
-        method = "permute",                      # permutation-based VI scores
-        num_features = 10,                       # plots top 10 features
-        pred_wrapper = pred_wrapper,             # user-defined prediction function
-        train = as.data.frame(orig_train_data) , # training data
-        target = orig_train_labels[,2],          # response values used for training (column 2 is medium size class)
-        metric = "mse",                          # evaluation metric
-        progress = "text")                       # request a text-based progress bar
+p1 <- vip(object=model,                        # fitted model
+        method="permute",                      # permutation-based VI scores
+        num_features=10,                       # plots top 10 features
+        pred_wrapper=pred_wrapper,             # user-defined prediction function
+        train=as.data.frame(orig_train_data) , # training data
+        target=orig_train_labels[,2],          # response values used for training (column 2 is medium size class)
+        metric="mse",                          # evaluation metric
+        progress="text")                       # request a text-based progress bar
 
 # plot
 p1
@@ -759,8 +793,7 @@ p1all <- vip(object=model,
              metric="mse",
              progress="text")
 
-
-
+# save image
 png(filename="vip_allfeatures.png",width=5,height=20,units="in",res=300)
 p1all
 dev.off()
@@ -769,8 +802,6 @@ dev.off()
 # ICE curves (individual conditional expectation)
 
 ```{r, eval = FALSE}
-library(pdp)
-
 # from https://christophm.github.io/interpretable-ml-book/ice.html
 
 # Individual Conditional Expectation (ICE) plots display one line per instance that shows how the instance's prediction changes when a feature changes
@@ -796,13 +827,15 @@ p4 <- partial(object=model,
             train=as.data.frame(orig_train_data))
 
 # before unscale and back-transformation
+png(filename="ICE_curves.png",width=10,height=5,units="in",res=300)
 grid.arrange(p2%>%autoplot(alpha=0.1),
              p3%>%autoplot(alpha=0.1),
              p4%>%autoplot(alpha=0.1),
              ncol=3)
+dev.off()
 
 # unscale
-p2$AVGDEPTH <- (p2$AVGDEPTH*col_stddevs_trainval[2])+col_means_trainval[2]
+p2$AVGDEPTH <- (p2$AVGDEPTH*feat_stdevs$AVGDEPTH)+feat_mns$AVGDEPTH
 
 # back transform predictions
 p2$yhat <- exp(p2$yhat)-1
@@ -810,13 +843,15 @@ p3$yhat <- exp(p3$yhat)-1
 p4$yhat <- exp(p4$yhat)-1
 
 # after unscale and back-transformation
-grid.arrange(p2%>%autoplot(alpha=0.1),
-             p3%>%autoplot(alpha=0.1),
-             p4%>%autoplot(alpha=0.1),
+png(filename="ICE_curves_unscale_backtransform.png",width=10,height=5,units="in",res=300)
+grid.arrange(p2%>%autoplot(alpha=0.2),
+             p3%>%autoplot(alpha=0.2),
+             p4%>%autoplot(alpha=0.2),
              ncol=3)
+dev.off()
 ```
 
-# Partial dependence plot
+# partial dependence plot
 
 ```{r, eval = FALSE}
 
@@ -840,18 +875,20 @@ p5 <- partial(object=model,
 p5%>%autoplot()
 
 # unscale
-p5$AVGDEPTH <- (p5$AVGDEPTH*col_stddevs_trainval[2])+col_means_trainval[2]
+p5$AVGDEPTH <- (p5$AVGDEPTH*feat_stdevs$AVGDEPTH)+feat_mns$AVGDEPTH
 
 # back transform predictions
 p5$yhat <- exp(p5$yhat)-1
 
 # after unscale and back-transformation
+png(filename="PDP_depth_anom.png",width=6,height=5,units="in",res=300)
 p5%>%autoplot()
+dev.off()
 ```
 
-# Individual conditional expectation curve for is1130
+# individual conditional expectation curve for catch
 
-```{r}
+```{r, eval = FALSE}
 
 # prediction function wrapper, two arguments: object (the fitted model) and newdata
 # The function needs to return a vector of predictions (one for each observation)
@@ -860,16 +897,107 @@ pred_wrapper <- function(object,newdata){
   as.vector()
 }
 
-# is1130
+# plot a couple of older age classes from both regions
+
+# 
 p6 <- partial(object=model,
-            pred.var="TOWDUR",
+            pred.var="c_r2_age_5",
             pred.fun=pred_wrapper,
             train=as.data.frame(orig_train_data))
 
-p6%>%autoplot(alpha=0.1)
+# find column index to unscale
+ind<-which(colnames(feat_mns)=="c_r2_age_5")
+
+# unscale if it was scaled
+p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(feat_stdevs[,ind]))+as.numeric(feat_mns[,ind])
 
 # back transform predictions
 p6$yhat <- exp(p6$yhat)-1
 
-p6%>%autoplot(alpha=0.1)
+# plot
+png(filename="ICE_curves_c_r2_age_5.png",width=3,height=5,units="in",res=300)
+p6%>%autoplot(alpha=0.2)
+dev.off()
+
+# find ids with top 5 highest prediction at lower range of catch
+top_ind<-unique(p6$yhat.id[which(p6$yhat>400)]) # 3608 5336 5599 5902 6391
+bind_cols(datdat[top_ind,1:9],training[top_ind,c(74,4,5)])
+```
+
+# increase catch and compare predictions
+
+```{r, eval = FALSE}
+
+# adjust catch in large fish (age-5 and above) and rerun predictions for test data
+
+# testing labels and features
+test_labels <- select(testing,c(1,2,3)) 
+test_data <- select(testing,c(4:ncol(testing)))
+
+# increase catch for both regions age-5 and above by 5x
+colnames(test_data)[c(124:128,133:137)]
+colnames(feat_mns)[c(55:59,64:68)]
+colnames(feat_stdevs)[c(55:59,64:68)]
+
+# unscale
+w<-t((t(test_data[,c(124:128,133:137)])*as.numeric(feat_stdevs[,c(55:59,64:68)]))+as.numeric(feat_mns[,c(55:59,64:68)]))
+
+# 5x catch
+w<-w*5
+
+# scale back
+w<-
+
+# log transform labels
+test_labels <- log(test_labels+1)
+
+# convert to matrix
+# testing
+test_data <- as.matrix(test_data)
+test_labels <- as.matrix(test_labels)
+
+# make predictions
+test_predictions <- model%>%predict(test_data)
+
+# model performance on test set
+eval2 <- evaluate(model,test_data,test_labels,verbose=0)
+
+# back transform
+test_predictions <- round(exp(test_predictions)-1,2)
+true_labels <- round(exp(test_labels)-1,2)
+
+# combine observed values and predictions
+results <- data.frame(observed_small=as.numeric(true_labels[,1]),
+                    observed_medium=as.numeric(true_labels[,2]),
+                    observed_large=as.numeric(true_labels[,3]),
+                    predicted_small=as.numeric(test_predictions[,1]),
+                    predicted_medium=as.numeric(test_predictions[,2]),
+                    predicted_large=as.numeric(test_predictions[,3]))
+
+
+
+# mean squared error
+eval2
+
+# reshape prediction results for time series plots
+resdat<-results
+resdat$ID <- test_ind$ID
+datdat2 <- left_join(alldata[,1:9],resdat,by="ID")
+
+# carry over n abundance columns to observed abundance columns to resolve left_join NAs
+datdat2$observed_small<-datdat$nsmall
+datdat2$observed_medium<-datdat$nmedium
+datdat2$observed_large<-datdat$nlarge
+
+# compare predictions with catch and catch*5
+bothresults<-cbind(datdat[6872:7764,13:15],datdat2[6872:7764,13:15])
+
+plot(bothresults[,4]~bothresults[,1],xlim=c(0,10),ylim=c(0,10))
+abline(a=0,b=1)
+
+plot(bothresults[,5]~bothresults[,2],xlim=c(0,80),ylim=c(0,80))
+abline(a=0,b=1)
+
+plot(bothresults[,6]~bothresults[,3],xlim=c(0,25),ylim=c(0,25))
+abline(a=0,b=1)
 ```

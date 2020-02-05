@@ -769,6 +769,7 @@ write_csv(bind_cols(test_ind),"testing_notscaled.csv")
 # save scaling means and stdevs
 write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
 ```
+# Load Model Runs
 
 # Load model
 
@@ -948,13 +949,13 @@ mod_summs_sf <- strata_summs(datdat)
 ## Observed and Predicted
 
 ```{r}
-obs_pred_plot(mod_summs_sf)
+obs_pred_plot(mod_summs_sf, size_facets = TRUE)
 ```
 
 ## Observed - Predicted
 
 ```{r}
-strata_diffs_plot(mod_summs_sf)
+strata_diffs_plot(mod_summs_sf, size_facets = TRUE)
 ```
 
 

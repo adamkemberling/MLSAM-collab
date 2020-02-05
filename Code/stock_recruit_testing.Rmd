@@ -1,0 +1,1349 @@
+---
+title: "Spawn Recruit Testing"
+author: "Adam A. Kemberling"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+params:
+  pc: FALSE
+  user_name: "mbarajas"
+  common_name: "atlantic cod"
+  rebalance: "medium"
+  catch_adjust_year: "2014"
+---
+
+# Setup
+
+```{r,warning=FALSE,message=FALSE}
+
+#Global knit options
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# Libraries
+library(tidyverse)
+library(here)
+library(keras)
+library(caret)
+library(UBL)
+library(sf)
+library(gmRi)
+library(vip)
+library(pdp)
+library(patchwork)
+
+
+#Set appropriate path to box
+if(params$pc == TRUE) {
+  # MB setup
+
+  user.name <- params$user_name
+
+  mills_path <- shared.path(os.use = "windows", group = "Mills Lab", folder = NULL)
+  
+} else {
+  mills_path <- shared.path(os.use = "unix", group = "Mills Lab", folder = NULL)
+  reticulate::use_condaenv("rkeras2020")
+}
+
+#Helper Funs
+source(here("code/data_cleanup_funs.R"))
+source(here("code/data_reshaping_funs.R"))
+
+#GGplot theme
+theme_set(theme_bw())
+```
+
+# Load and Clean
+
+## 1. Filter and preprocess data
+
+```{r}
+# NEFSC bottom trawl
+load(str_c(mills_path, "Data/Survdat_Nye_allseason.RData"))
+
+# ID format
+survdat$ID <- format(survdat$ID,scientific=FALSE)
+
+# filter years
+dat <- survdat %>% filter(EST_YEAR%in%c(1982:2015))
+
+# filter seasons
+dat <- dat %>% filter(SEASON%in%c("SPRING","FALL"))
+
+# filter strata
+# offshore strata to include are (starts with 1 ends with 0, so offshore strata number 13 is 1130)
+# inshore strata to include are (starts with 3 ends with 0, so inshore strata 61 is 3610)
+# strata <- c(1130,1140,1150,1160,1170,1180,1190,1200,1210,1220,1230,1240,1250,1260,1270,1280,
+#           1290,1300,1360,1370,1380,1390,1400,3560,3580,3590,3600,3610,3630,3640,3650,3660)
+
+# Stratum Key for filtering specific areas
+strata_key <- list(
+  "Georges Bank"  = c(1130,1140, 1150, 1160, 1170, 1180, 1190, 
+                      1200, 1210, 1220, 1230, 1240, 1250, 3560),
+  "Gulf of Maine" = c(1260, 1270, 1280, 1290, 1300, 1360, 1370, 1380, 
+                      1390, 1400, 3580, 3590, 3600, 3610, 3630, 3640, 3650, 3660))
+
+# the strata we want
+strata <- c(
+  strata_key$`Georges Bank`, 
+  strata_key$`Gulf of Maine`)
+
+# filter Strata
+dat <-dat %>% filter(STRATUM%in%strata)
+
+
+# Pull Target Species
+species_pull <- species_selection(survey_data = dat, common_name = params$common_name)
+cod <- species_pull$cod
+codtow <- species_pull$codtow
+
+
+# one row for every unique ID
+dat <- dat %>% distinct(ID,.keep_all=TRUE)
+```
+
+## 2. Set size classes
+
+```{r}
+# bin lengths to 3 groups: small <20, medium 20-60, large >60
+cod$SIZE <- ifelse(cod$LENGTH < 20, "small", ifelse(cod$LENGTH > 60,"large","medium"))
+cod$NUM <- 1
+
+# for each ID, count number of small, medium, and large
+x <- cod %>% pivot_wider(id_cols = ID, names_from = SIZE, values_from = NUM, values_fn = list(NUM = sum))
+
+# join with codtow
+codtow <- left_join(codtow, x, by="ID")
+
+# remove LENGTH, NUMLEN
+codtow <- select(codtow, -c(LENGTH, NUMLEN))
+
+# join tows with cod with tows without cod
+x <- left_join(dat, codtow, by="ID")
+
+# select columns to keep
+x <- select(x, c(1:29,35:43,74,75,76,77,78,88,89,90))
+
+# if COMNAME is NA, fill-in biomass, abundance, small, medium, large with 0
+notcod <- which(is.na(x$COMNAME.y))
+x$BIOMASS.y[notcod] <- 0
+x$ABUNDANCE.y[notcod] <- 0
+x$small[notcod] <- 0
+x$medium[notcod] <- 0
+x$large[notcod] <- 0
+
+# for tows with cod, fill-in size category abundance NA with 0
+x$small[is.na(x$small)] <- 0
+x$medium[is.na(x$medium)] <- 0
+x$large[is.na(x$large)] <- 0
+
+# proportion of relative abundance/biomass allocated to each size class
+
+#Replace Loop
+x <- x %>% 
+  mutate(
+    nsmall   = ABUNDANCE.y * small / (small + medium + large),
+    nmedium  = ABUNDANCE.y * medium / (small + medium + large),
+    nlarge   = ABUNDANCE.y * large / (small + medium + large),
+    nsmall   = ifelse(is.na(nsmall) == T, 0, nsmall),
+    nmedium  = ifelse(is.na(nmedium) == T, 0, nmedium),
+    nlarge   = ifelse(is.na(nlarge) == T, 0, nlarge),
+    bsmall   = BIOMASS.y * small / (small + medium + large),
+    bmedium  = BIOMASS.y * medium / (small + medium + large),
+    blarge   = BIOMASS.y * large / (small + medium + large),
+    bsmall   = ifelse(is.na(bsmall) == T, 0, bsmall),
+    bmedium  = ifelse(is.na(bmedium) == T, 0, bmedium),
+    blarge   = ifelse(is.na(blarge) == T, 0, blarge)
+  )
+
+```
+
+## 3. Weight by strata
+
+```{r,message=FALSE}
+# bring in strata area
+strataarea <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/strata area.csv"), 
+                       col_types = cols())
+
+strataarea <- select(strataarea, area, stratum)
+colnames(x)[25] <- "stratum"
+x <- left_join(x, strataarea, by="stratum")
+
+# column names without .x or .y at the end
+colnames(x) <- str_split(string = colnames(x), pattern="[.]", simplify=TRUE)[,1]
+
+# Assign strata to area
+# Georges Bank: 1130 1140 1150 1160 1170 1180 1190 1200 1210 1220 1230 1240 1250 3560
+# Gulf of Maine: 1260 1270 1280 1290 1300 1360 1370 1380 1390 1400 3580 3590 3600 3610 3630 3640 3650 3660
+# GBstrata <- c(1130,1140,1150,1160,1170,1180,1190,1200,1210,1220,1230,1240,1250,3560)
+
+# specify prior area columns (statistical area and stratum size area)
+colnames(x)[c(30,53)] <- c("STATAREA","STRATUMAREA")
+
+x$AREA <- ifelse(x$stratum %in% strata_key$`Georges Bank`, "GB", "GoM")
+
+# calculate annual area/season/size class mean abundance and biomass within strata
+# area: GoM, GB
+# season: spring, fall
+# size class: small, medium, large
+x %>%
+  group_by(EST_YEAR,AREA,SEASON,stratum) %>%
+  summarise(mnsmall     = mean(nsmall), 
+            mnmedium    = mean(nmedium),
+            mnlarge     = mean(nlarge),
+            mnbsmall    = mean(bsmall),
+            mnbmedium   = mean(bmedium),
+            mnblarge    = mean(blarge),
+            STRATUMAREA = mean(STRATUMAREA)
+            ) -> q
+
+# calculate stratum weights by stratum area
+q %>%
+  group_by(EST_YEAR, AREA, SEASON) %>%
+  mutate(weight = STRATUMAREA / (sum(STRATUMAREA))
+         ) -> q
+
+# calculate annual area/season/size class mean abundance and biomass across strata
+q %>%
+  group_by(EST_YEAR, AREA, SEASON) %>%
+  summarise(abundance_small  = weighted.mean(mnsmall, weight),
+            abundance_medium = weighted.mean(mnmedium, weight),
+            abundance_large  = weighted.mean(mnlarge, weight),
+            biomass_small    = weighted.mean(mnbsmall, weight),
+            biomass_medium   = weighted.mean(mnbmedium, weight),
+            biomass_large    = weighted.mean(mnblarge, weight)
+            ) -> p
+
+# long format for plots
+p %>%
+  pivot_longer(
+    cols = 4:9,
+    names_to = c("type", "size"),
+    names_patter = "(.*)_(.*)",
+    values_to = "value"
+  ) -> a
+```
+
+## 4. Stratified abundance plot
+
+```{r}
+# plot abundance
+a %>%
+  filter(type == "abundance")%>%
+  ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
+  geom_line(size = 1)+
+  facet_grid(AREA + SEASON ~., scales="free") +
+  labs(title = "stratified mean abundance", x = "year", y = "mean abundance per tow across strata")
+```
+
+# Feature engineering
+
+## 1. Year Lags
+
+```{r}
+testing_years <- c(2000:2003)
+testing_regions <- c("GB", "GOM")
+testing_season <- c("FALL", "SPRING")
+scenarios <- c(0.5, 1, 1.5)
+
+#names(p)
+```
+
+
+```{r}
+#Build dataset with specified number of lag years (region toggles don't currently work)
+survdf <- lag_years(p = p, nlags = 3, GB = TRUE, GOM = TRUE)
+
+# join with x dataframe by EST_YEAR and year
+towsurv <- left_join(x,survdf,by=c("EST_YEAR"="year"))
+
+# columns for tow information
+moddf <- select(towsurv, c(ID,EST_YEAR,SEASON,SVVESSEL,TOWDUR,AVGDEPTH,stratum,nsmall,nmedium,nlarge,AREA))
+
+# stratified mean values
+stratmnvals <- select(towsurv, c(55:102))
+```
+
+## 2. SST with year lags
+
+SST at trawl locations at year i, i-1, and regional SST at year i-1
+
+```{r,message=FALSE}
+###############################################################################################
+# now to add in SST for each trawl ID location for year i
+trawltemp <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/TrawlTemperatures2.csv"),
+                    col_names = c("ID","tempK","tempK10","anom","anom10"), 
+                    col_types = cols())
+
+trawltemp$ID <- format(trawltemp$ID, scientific = FALSE)
+
+# convert Kelvin to Celsius
+trawltemp <- trawltemp %>% mutate(tempC = tempK - 273.15,
+                                  tempC10 = tempK10 - 273.15)
+
+# join with widedat by ID
+widedat <- left_join(moddf, trawltemp[, -c(2,3,6,7)], by = "ID")
+
+# trawl SST for year i-1 and regional SST for year i-1
+trawltempprev <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/TrawlTemperatures_Previous2.csv"),
+                          col_types = cols())
+trawltempprev$ID <- format(trawltempprev$ID, scientific = FALSE)
+
+# complete cases
+trawltempprev <- trawltempprev[complete.cases(trawltempprev),]
+
+# convert Kelvin to celsius for monthly temperature columns
+trawltempprev[, c(3:14,16:27)] <- trawltempprev[, c(3:14,16:27)] - 273.15
+```
+
+## 3. One-hot encoding
+
+```{r}
+###############################################################################################
+# change factors to characters
+#str(widedat)
+widedat$SVVESSEL <- as.character(widedat$SVVESSEL)
+widedat$SEASON <- as.character(widedat$SEASON)
+
+# one-hot encode season, vessel, stratum, area
+onehot <- data.frame(matrix(NaN,nrow=nrow(widedat),ncol=39))
+colnames(onehot) <- paste("is",c(rev(unique(widedat$AREA)),
+                               unique(widedat$SEASON),
+                               unique(widedat$SVVESSEL),
+                               sort(unique(widedat$stratum))),sep="")
+
+# AREA
+onehot$isGoM <- ifelse(widedat$AREA=="GoM",1,0)
+onehot$isGB <- ifelse(widedat$AREA=="GB",1,0)
+
+# SEASON
+onehot$isSPRING <- ifelse(widedat$SEASON=="SPRING",1,0)
+onehot$isFALL <- ifelse(widedat$SEASON=="FALL",1,0)
+
+# VESSEL
+onehot$isDE <- ifelse(widedat$SVVESSEL=="DE",1,0)
+onehot$isAL <- ifelse(widedat$SVVESSEL=="AL",1,0)
+onehot$isHB <- ifelse(widedat$SVVESSEL=="HB",1,0)
+
+# STRATUM
+strata <- sort(unique(widedat$stratum))
+for(i in 1:nrow(onehot)){
+  onehot[i, which(strata == widedat$stratum[i]) + 7] <- 1
+  }
+onehot[is.na(onehot)] <- 0
+
+# bind together
+widedat <- bind_cols(widedat,onehot)
+
+# last bit of reordering columns
+widedat <- widedat[,c(1,11,2:4,7,8,9,10,5,6,12:52)]
+```
+
+## 4. Annual landings data
+
+```{r,message=FALSE}
+###############################################################################################
+# catch data for year i-1
+gomcatch <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/gom_catch_at_age_19.csv"), 
+                     col_types = cols()) # ages 1-9+ years 1982-2018
+gbcatch <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/gb_catch_at_age_19.csv"), 
+                    col_types = cols()) # ages 1-10+ years 1978-2014
+# age overlap is ages 1-9+
+# year overlap is years 1982-2014
+
+# remove + signs in column names
+colnames(gomcatch)[10] <- "age_9plus"
+colnames(gbcatch)[11] <- "age_10"
+
+# for GB, combine age 9 and 10+
+gbcatch <- gbcatch %>% mutate(age_9plus=age_9+age_10)
+gbcatch <- select(gbcatch, -c(age_9,age_10))
+
+# remove years prior to 1982 for GB
+gbcatch <- gbcatch %>% filter(year >= 1982)
+
+# remove years after 2014 for GoM
+gomcatch <- gomcatch %>% filter(year <= 2014)
+
+# rename columns to specify GoM or GB
+# catch = c, r1 = GoM, r2 = GB
+colnames(gomcatch)[2:10] <- paste("c_r1_", colnames(gomcatch)[2:10], sep="")
+colnames(gbcatch)[2:10] <- paste("c_r2_", colnames(gbcatch)[2:10], sep="")
+catch <- left_join(gomcatch, gbcatch, by = "year")
+
+# bump catch years up by year to pair with current year
+catch$year <- catch$year+1
+```
+
+## 5. Regional SST 
+
+```{r,message=FALSE}
+###############################################################################################
+# Regional SST for year i
+SST_GB <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/SSTdata_GB.csv"),
+                 col_names = c("year","yranom_gb","year2","m1_gb","m2_gb","m3_gb","m4_gb","m5_gb",
+                               "m6_gb","m7_gb","m8_gb","m9_gb","m10_gb","m11_gb","m12_gb", "year3",
+                               "m1anom_gb","m2anom_gb","m3anom_gb","m4anom_gb","m5anom_gb","m6anom_gb",
+                               "m7anom_gb","m8anom_gb","m9anom_gb","m10anom_gb","m11anom_gb","m12anom_gb"),
+                 col_types = cols())
+
+SST_GoM <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/SSTdata_GOM.csv"),
+                  col_names=c("year","yranom_gom","year2","m1_gom","m2_gom","m3_gom","m4_gom","m5_gom",
+                              "m6_gom","m7_gom","m8_gom","m9_gom","m10_gom","m11_gom","m12_gom","year3",
+                              "m1anom_gom","m2anom_gom","m3anom_gom","m4anom_gom","m5anom_gom","m6anom_gom",
+                              "m7anom_gom","m8anom_gom","m9anom_gom","m10anom_gom","m11anom_gom","m12anom_gom"),
+                  col_types = cols())
+
+# remove extra year columns
+SST_GB <- select(SST_GB, -c(year2,year3))
+SST_GoM <- select(SST_GoM, -c(year2,year3))
+
+# join data frames together
+SST <- left_join(SST_GoM,SST_GB,by="year")
+
+```
+
+
+
+# Training-Testing-Validation
+
+```{r,message=FALSE}
+
+# combine together
+
+# bind with stratmnvals
+alldata <- bind_cols(widedat, stratmnvals)
+
+# add catch data to survey data
+alldata <- left_join(alldata, catch, by = c("EST_YEAR" = "year"))
+
+# join trawltempprev with alldata by ID
+alldata <- left_join(alldata, trawltempprev, by = "ID")
+
+# join SST
+alldata <- left_join(alldata, SST, by = c("EST_YEAR" = "year"))
+
+# complete cases only
+alldata <- alldata[complete.cases(alldata),]
+
+# split years into train/test (no validation)
+train_years <- c(1985:2012)
+val_years <- NULL
+test_years <- c(2013:2015)
+
+# 1985-2012 as training data
+train_ind <- alldata %>% filter(EST_YEAR %in% train_years)
+# no validation
+val_ind <- alldata %>% filter(EST_YEAR %in% val_years)
+# 2013-2015 as testing
+test_ind <- alldata %>% filter(EST_YEAR %in% test_years)
+
+# training labels and features
+train_labels <- select(train_ind, c("nsmall", "nmedium", "nlarge"))
+train_data <- select(train_ind, c(10:ncol(train_ind)))
+
+# validation labels and features
+val_labels <- select(val_ind, c("nsmall", "nmedium", "nlarge"))
+val_data <- select(val_ind, c(10:ncol(val_ind)))
+
+# testing labels and features
+test_labels <- select(test_ind, c("nsmall", "nmedium", "nlarge"))
+test_data <- select(test_ind, c(10:ncol(test_ind)))
+test_data_df <- test_data
+```
+
+## 1. Standardize Features
+
+### Get Scaling Parameters 
+
+```{r}
+# Normalize features
+# 1 is TOWDUR
+# 2 is AVGDEPTH
+# 44:91 is stratified mean abundance year i and year i-1,i-2,i-3
+# 92:109 is catch
+# 111:122 is R1 temp year i-1 (GoM)
+# 124:135 is R2 temp year i-1 (GB)
+# 137:148 is GoM temp year i
+# 162:173 is GB temp year i
+
+
+#Columns to normalize
+thesecols <- c(1,2,44:91,92:109,111:122,124:135,137:148,162:173)
+thesenames <- colnames(train_data)[thesecols]
+
+# validation and testing data is not used when calculating mean and std
+# split features to be normalized
+sccols <- select(train_data, thesecols)
+
+# calculate mean and std of training data
+sccols <- scale(sccols)
+
+# use mean and std from training data to normalize training, validation and testing data
+col_means_trainval <- attr(sccols,"scaled:center")
+col_stddevs_trainval <- attr(sccols,"scaled:scale")
+
+####  Standardize training data  ####
+# split features to be normalized
+sccolstrain <- select(train_data, thesecols)
+train_data  <- select(train_data, -thesecols)
+
+# normalize
+sccolstrain <- scale(sccolstrain, center = col_means_trainval, scale = col_stddevs_trainval)
+
+# put back together
+sccolstrain <- as.data.frame(sccolstrain)
+colnames(sccolstrain) <- thesenames
+train_data <- bind_cols(train_data,sccolstrain)
+
+####  Standardize validation data  ####
+# split features to be normalized
+sccolsval <- select(val_data, thesecols)
+val_data <- select(val_data, -thesecols)
+
+# normalize
+sccolsval <- scale(sccolsval, center = col_means_trainval, scale = col_stddevs_trainval)
+```
+
+
+
+
+
+### Manipulate un-standardized catch
+
+
+```{r}
+#Objective:
+#Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
+
+#Year can be accesses by looking at where the catch at age values break or by using alldata
+year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+
+#Catch Scenarios
+catch_scenarios <- c(0.25, 0.5, 1, 10, 50, 100, 150, 250, 500)
+
+#Make lists containing test data for various scenarios
+
+
+
+#2013 Adjustments
+#test_catch_scenarios <- map(catch_scenarios, function(x){
+catch_scenarios_13 <- map(catch_scenarios, function(x){
+  
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2013",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )
+  
+    #Same vals for 2014 and 15
+    y2014 <- test_data_df[year_labs == "2014",] 
+    y2015 <- test_data_df[year_labs == "2015",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(adjusted_year, y2014, y2015)
+    return(catch_out)
+  
+  })
+
+#2014
+catch_scenarios_14 <- map(catch_scenarios, function(x){
+  
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2014",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )
+  
+    #Same vals for 2014 and 15
+    y2013 <- test_data_df[year_labs == "2013",] 
+    y2015 <- test_data_df[year_labs == "2015",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(y2013, adjusted_year, y2015)
+    return(catch_out)
+  
+  })
+
+#2015
+catch_scenarios_15 <- map(catch_scenarios, function(x){
+  
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2015",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )    
+      #Same vals for 2014 and 15
+    y2013 <- test_data_df[year_labs == "2013",] 
+    y2014 <- test_data_df[year_labs == "2014",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(y2013, y2014, adjusted_year)
+    return(catch_out)
+  })
+  
+  
+
+
+#Name the list by the scenario being tested
+names(catch_scenarios_13) <- str_c(catch_scenarios, " * Observed Catch")
+names(catch_scenarios_14) <- str_c(catch_scenarios, " * Observed Catch")
+names(catch_scenarios_15) <- str_c(catch_scenarios, " * Observed Catch")
+```
+
+
+
+### Re-assemble
+
+```{r}
+# put back together
+sccolsval <- as.data.frame(sccolsval)
+colnames(sccolsval) <- thesenames
+val_data <- bind_cols(val_data, sccolsval)
+```
+
+
+```{r standard test data}
+####  testing data  ####
+# split features to be normalized
+sccolstest <- select(test_data, thesecols)
+test_data  <- select(test_data, -thesecols)
+
+# normalize
+sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+
+# put back together
+sccolstest <- as.data.frame(sccolstest)
+colnames(sccolstest) <- thesenames
+test_data <- bind_cols(test_data, sccolstest)
+
+```
+
+
+```{r catch scenario data}
+
+#Standardize the test catch scenarios
+
+#2014 Adjustments
+catch_scenarios_13 <- catch_scenarios_13 %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
+
+#2014 Adjustments
+catch_scenarios_14 <- catch_scenarios_14 %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
+
+#2015 Adjustments
+catch_scenarios_15 <- catch_scenarios_15 %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
+```
+
+
+## 2. Re-balancing
+
+oversample rare instances in training data (observations with high abundance in medium size class)
+
+```{r}
+
+# bind train_labels with train_data
+imbal <- bind_cols(train_labels, train_data)
+
+
+#Re-balance using specified size class
+if(params$rebalance == "medium") {
+  
+  # relevance function
+  begin_rel <- quantile(imbal$nmedium, 0.8)
+  end_rel <- quantile(imbal$nmedium, 0.9)
+  rel <- matrix(c(begin_rel, 0, 0, end_rel, 1, 0), 
+                ncol=3, 
+                byrow=TRUE)
+  
+  # oversample
+  bal <- ImpSampRegress(form = nmedium ~ ., 
+                        dat = imbal, 
+                        rel = rel, 
+                        O = 5, 
+                        U = 0.5)
+  
+} else if(params$rebalance == "none") {
+  
+  #Perform no rebalancing
+  bal <- imbal
+  
+}
+
+```
+
+
+## 3. Split labels and features
+
+```{r}
+
+# split labels and features
+train_labels <- bal[, c("nsmall", "nmedium", "nlarge")]
+train_data   <- bal[, c(4:ncol(bal))]
+
+# log transform labels
+train_labels <- log(train_labels + 1)
+val_labels   <- log(val_labels + 1)
+test_labels  <- log(test_labels + 1)
+
+# convert to matrix
+# training
+train_data   <- as.matrix(train_data)
+train_labels <- as.matrix(train_labels)
+
+# validation
+val_data <- as.matrix(val_data)
+val_labels <- as.matrix(val_labels)
+
+# testing
+test_data_df <- test_data
+test_data <- as.matrix(test_data)
+test_labels <- as.matrix(test_labels)
+```
+
+
+### TESTING: Manipulate Standardized Catch Data
+
+```{r, eval = FALSE}
+# 
+# # test_data   #Predictors
+# # test_labels #Observed Responses
+# 
+# #Objective:
+# #Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
+# 
+# #Year can be accesses by looking at where the catch at age values break or by using alldata
+# year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+# 
+# #Catch Scenarios
+# catch_scenarios <- c(0.25, 0.5, 1 , 1.5, 2, 5, 10)
+# 
+# 
+# test_catch_scenarios <- map(catch_scenarios, function(x){
+#   
+#   #Adjust 2013 catches
+#   new_2013 <- test_data_df[year_labs == "2013",] %>% 
+#     mutate(
+#       #Region 1
+#        c_r1_age_3     =  c_r1_age_3 * x,
+#        c_r1_age_4     =  c_r1_age_4 * x,
+#        c_r1_age_5     =  c_r1_age_5 * x,
+#        c_r1_age_6     =  c_r1_age_6 * x,
+#        c_r1_age_7     =  c_r1_age_7 * x,
+#        c_r1_age_8     =  c_r1_age_8 * x,
+#        c_r1_age_9plus =  c_r1_age_9plus * x,
+#        #Region 2
+#        c_r2_age_3     =  c_r2_age_3 * x,
+#        c_r2_age_4     =  c_r2_age_4 * x,
+#        c_r2_age_5     =  c_r2_age_5 * x,
+#        c_r2_age_6     =  c_r2_age_6 * x,
+#        c_r2_age_7     =  c_r2_age_7 * x,
+#        c_r2_age_8     =  c_r2_age_8 * x,
+#        c_r2_age_9plus =  c_r2_age_9plus * x
+#       
+#     ) 
+#   
+#   
+#   #Same vals for 2014 and 15
+#   same_1415 <- test_data_df[year_labs != "2013",] 
+#   
+#   #Bind them together
+#   catch_out <- bind_rows(list("2013" = new_2013, "2014-15" = same_1415)) %>% 
+#     as.matrix()
+#   
+#   return(catch_out)
+#   
+#   
+# })
+# 
+# 
+# names(test_catch_scenarios) <- str_c(catch_scenarios, " * Observed Catch")
+```
+
+
+# Keras Model (s)
+
+###  Model Setup
+
+```{r}
+# keras model
+
+# input layer
+inputs <- layer_input(shape = dim(train_data)[2])
+
+# outputs are input + dense layers
+predictions <- inputs %>%
+  layer_dense(units = dim(train_data)[2], 
+              activation = "relu", 
+              kernel_initializer = "he_normal", 
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = dim(train_data)[2], 
+              activation = "relu", 
+              kernel_initializer = "he_normal", 
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = dim(train_labels)[2])
+
+
+# create model
+model <- keras_model(inputs = inputs, outputs = predictions)
+
+# compile
+model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
+  
+# summary
+model %>% summary()
+```
+
+### Train Model
+
+```{r}
+# train model and store training progress learning curves (no validation)
+history <- model %>% fit(train_data, train_labels, epochs = 50, verbose = 1)
+
+# model performance on test set
+eval <- evaluate(model, test_data, test_labels, verbose = 0)
+```
+
+### Make Predictions
+
+```{r}
+# make predictions
+test_predictions <- model %>% predict(test_data)
+
+# back transform
+test_predictions <- round(exp(test_predictions) -1, 2)
+true_labels <- round(exp(test_labels) -1, 2)
+
+# combine observed values and predictions
+results <- data.frame(
+  observed_small   = as.numeric(true_labels[,1]),
+  observed_medium  = as.numeric(true_labels[,2]),
+  observed_large   = as.numeric(true_labels[,3]),
+  predicted_small  = as.numeric(test_predictions[,1]),
+  predicted_medium = as.numeric(test_predictions[,2]),
+  predicted_large  = as.numeric(test_predictions[,3]))
+
+# learning curves
+plot(history)
+
+# mean squared error
+eval
+
+# reshape prediction results for time series plots
+resdat <- results
+resdat$ID <- test_ind$ID
+datdat <- left_join(alldata[,1:9], resdat, by="ID")
+
+
+# carry over n abundance columns to observed abundance columns to resolve left_join NAs
+datdat$observed_small <- datdat$nsmall
+datdat$observed_medium <- datdat$nmedium
+datdat$observed_large <- datdat$nlarge
+```
+
+
+### Save model
+```{r, eval = FALSE}
+## save ANN model
+# save_model_hdf5(object = model, filepath = here("model_runs", "stockrecruit.h5"))
+
+## save predictions
+# write_csv(datdat, here("predictions20132015.csv"), col_names = TRUE)
+
+## save training labels and features after features have been scaled
+# write_csv(imbal,"training.csv")
+
+## save testing labels and features after features have been scaled
+# write_csv(bind_cols(test_labels,test_data),"testing.csv")
+
+## save scaling means and stdevs
+# write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
+```
+
+### Re-Load Model Runs
+
+```{r, eval = FALSE}
+# # load saved model
+# model<-load_model_hdf5(filepath="model_runs/stockrecruit.h5")
+# 
+# # load predictions
+# datdat <- read_csv("predictions20132015.csv",guess_max=7000)
+# 
+# # load training
+# training <- read_csv("training.csv")
+# 
+# # load testing
+# testing <- read_csv("testing.csv")
+# 
+# # load scaling means and stdevs
+# scaling <- read_csv("feature_means_stdevs.csv")
+# 
+# # first row are means
+# feat_mns <- scaling[1,]
+# 
+# # second row are stdevs
+# feat_stdevs <- scaling[2,]
+```
+
+
+# Assessing Catch Scenarios
+
+```{r fig.height = 8}
+
+# #Manual switching between years
+# params$catch_adjust_year <- "2013"
+
+#Parameter Toggle for focal year when knitting
+if(params$catch_adjust_year == "2013"){test_catch_scenarios <- catch_scenarios_13}
+if(params$catch_adjust_year == "2014"){test_catch_scenarios <- catch_scenarios_14}
+if(params$catch_adjust_year == "2015"){test_catch_scenarios <- catch_scenarios_15}
+
+
+#Get Predictions for each catch scenario
+test_catch_predictions <- map(test_catch_scenarios, function(x) {
+  # make predictions
+  test_predictions <- model %>% predict(x)
+  
+  # back transform
+  test_predictions <- round(exp(test_predictions) -1, 2)
+  test_predictions <- as.data.frame(test_predictions)
+  names(test_predictions) <- c("predicted_small", "predicted_medium", "predicted_large")
+  
+  
+  
+  #Add other factors
+  year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+  area_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(AREA)
+  season_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(SEASON)
+  stratum_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(stratum)
+  
+  
+  #And Actual Data
+  observed_data <- data.frame(
+    observed_small   = as.numeric(true_labels[,1]),
+    observed_medium  = as.numeric(true_labels[,2]),
+    observed_large   = as.numeric(true_labels[,3])
+  )
+  
+  #Add station info back in
+  test_predictions <- bind_cols(year_labs,
+                                area_labs,
+                                season_labs,
+                                stratum_labs,
+                                observed_data,
+                                test_predictions)
+  
+  return(test_predictions)
+
+})
+
+
+#Coalesce into a single dataframe for plotting
+test_catch_predictions <- test_catch_predictions %>% bind_rows(.id = "catch scenario") %>% 
+  mutate(`catch scenario` = factor(`catch scenario`, levels = str_c(catch_scenarios, " * Observed Catch")),
+         SEASON = factor(SEASON, levels = c("SPRING", "FALL")))
+
+
+
+############################################################
+####    Plotting Code    ####
+############################################################
+
+
+#Plotting the different predicted size classes
+small_plot <- ggplot(test_catch_predictions, 
+                     aes(as.factor(EST_YEAR), predicted_small, color = `catch scenario`)) +
+  geom_boxplot() + 
+  labs(x = NULL, y = "Predicted N-Small", 
+       title = str_c("Adjusted ", as.numeric(params$catch_adjust_year) - 1, " Commercial Landings of 3+ Age Fish"),
+       subtitle = str_c("Impacts on predicted size classes \nRebalanced by ", params$rebalance, "size-class")) +
+  facet_wrap(~SEASON) + 
+  theme(legend.position = "none")
+
+medium_plot <- ggplot(test_catch_predictions, 
+                      aes(as.factor(EST_YEAR), predicted_medium, color = `catch scenario`)) +
+  geom_boxplot() + labs(x = NULL, y = "Predicted N-Medium") +
+  facet_wrap(~SEASON) + 
+  theme(legend.position = "none")
+
+large_plot <- ggplot(test_catch_predictions, 
+                     aes(as.factor(EST_YEAR), predicted_large, color = `catch scenario`)) +
+  geom_boxplot() + labs(x = NULL, y = "Predicted N-Large") +
+  facet_wrap(~SEASON) +
+  guides(color = guide_legend(title = str_c(as.numeric(params$catch_adjust_year) - 1, " Catch Adjustment"), title.hjust = 0.5, title.position = "top")) +
+  theme(legend.position = "bottom")
+
+
+#Plot all 3 together
+small_plot / medium_plot / large_plot
+
+
+
+```
+
+
+
+## Catch Scenario Spatial Patterns
+
+```{r, eval = FALSE}
+# ####  Load Model Prediction Data  ####
+# # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+# 
+# #Set appropriate path to box
+# if(params$pc == TRUE) {
+#   # MB setup
+# 
+#   user.name <- params$user_name
+# 
+#   res_path <- shared.path(os.use = "windows", group = "RES Data", folder = NULL)
+#   
+# } else {
+#   
+#   res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
+#   
+# }
+# 
+# ####  Load Strata Shapefiles  ####
+# survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))
+# 
+# ####  Join with Strata Geometries  ####
+# 
+# #Do group summaries
+# catch_scenarios_sf <- test_catch_predictions %>% 
+#   mutate(
+#       #STRATUMA = str_c("0", stratum), 
+#       STRATA = as.integer(stratum),
+#       stratum = NULL) %>% 
+#     group_by(`catch scenario`, EST_YEAR, SEASON, STRATA) %>% 
+#     summarise(
+#       obs_small = mean(observed_small, na.rm = T),
+#       obs_medium = mean(observed_medium, na.rm = T),
+#       obs_large = mean(observed_large, na.rm = T),
+#       pred_small = mean(predicted_small, na.rm = T),
+#       pred_medium = mean(predicted_medium, na.rm = T),
+#       pred_large = mean(predicted_large, na.rm = T),
+#       diff_small = obs_small - pred_small,
+#       diff_medium = obs_medium - pred_medium,
+#       diff_large = obs_large - pred_large
+#       ) %>% 
+#     ungroup() %>% 
+#     pivot_longer(names_to = "source", values_to = "abundance", obs_small:diff_large) %>% 
+#     mutate(
+#       size = ifelse(str_detect(source, "small"), "small", ifelse(str_detect(source, "medium"), "medium", "large")),
+#       type = ifelse(str_detect(source, "obs"), "observed", ifelse(str_detect(source, "diff"), "obs - pred", "predicted")),
+#       size = factor(size, levels = c("small", "medium", "large")),
+#       type = factor(type, levels = c("observed", "predicted", "obs - pred"))
+#       )
+# 
+# #Make it an sf object
+# catch_scenarios_sf <- survey_strata %>% inner_join(catch_scenarios_sf, by = "STRATA")
+# 
+# 
+# #Plot Predictions
+# catch_scenarios_sf %>% 
+#   filter(
+#     `catch scenario` == "500 * Observed Catch",
+#     str_detect(source, "pred"),
+#          SEASON == "SPRING",
+#          EST_YEAR == 2013,
+#          size == "large") %>% 
+#   ggplot() +
+#   geom_sf(aes(fill = abundance)) +
+#   facet_grid( `catch scenario` ~ .) +
+#   guides(fill = guide_colorbar(title.hjust = 0.5, title.position = "top")) +
+#   theme(legend.position = "bottom")
+
+
+```
+
+
+# General Model Diagnostics
+
+## 1. Observed vs. Predicted
+
+```{r}
+#Factor Summaries
+model_summs <- datdat %>%
+  group_by(year = EST_YEAR, area = AREA, season = SEASON) %>%
+  summarise(psmall = sum(predicted_small),
+            pmedium = sum(predicted_medium),
+            plarge = sum(predicted_large),
+            osmall = sum(observed_small),
+            omedium = sum(observed_medium),
+            olarge = sum(observed_large)) %>%
+  pivot_longer(cols=4:9,names_to=c("type","size"),values_to="abundance",names_sep=1) %>% 
+  mutate(size = factor(size, levels = c("small", "medium", "large")),
+         type = ifelse(type == "p", "predicted", "observed"))
+
+
+model_summs %>% 
+  split(.$area) %>% 
+  map(~ split(.x, .x$season))
+
+# GoM SPRING
+model_summs %>%
+  filter(area == "GoM" & season == "SPRING") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "GoM SPRING") +
+  facet_grid(size ~., scales = "free")
+
+# GoM FALL
+model_summs %>%
+  filter(area == "GoM" & season == "FALL") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "GoM FALL") +
+  facet_grid(size ~., scales = "free")
+
+# GB SPRING
+model_summs %>%
+  filter(area == "GB" & season == "SPRING") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "GB SPRING") +
+  facet_grid(size ~., scales = "free")
+
+# GB FALL
+model_summs %>%
+  filter(area == "GB" & season == "FALL") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "GB FALL") +
+  facet_grid(size ~., scales = "free")
+```
+
+
+## 2. Train vs. Test
+
+
+```{r}
+# plot
+datdat %>%
+  filter(EST_YEAR %in% test_years) %>%
+  pivot_longer(cols = 10:15, names_to = c("type","size"), values_to = "abundance", names_pattern = "(.*)_(.*)") %>%
+  group_by(type,size) %>%
+  summarise(abundance = sum(abundance)) %>%
+  ggplot(aes(x = factor(type, levels = c("observed", "predicted")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "type")+
+  scale_fill_discrete("size")
+
+# small
+datdat %>%
+  filter(EST_YEAR %in% test_years) %>%
+  ggplot()+
+  geom_point(aes(x = observed_small, y = predicted_small), alpha = 0.1)
+
+# medium
+datdat %>%
+  filter(EST_YEAR %in% test_years) %>%
+  ggplot()+
+  geom_point(aes(x = observed_medium, y = predicted_medium), alpha = 0.1)
+  
+# large
+datdat %>%
+  filter(EST_YEAR %in% test_years) %>%
+  ggplot() +
+  geom_point(aes(x = observed_large, y = predicted_large), alpha = 0.1)
+```
+
+
+
+## 3. Strata Plots {.tabset .tabset-pills}
+
+```{r}
+####  Load Model Prediction Data  ####
+# datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+
+
+
+#Set appropriate path to box
+if(params$pc == TRUE) {
+  # MB setup
+
+  user.name <- params$user_name
+
+  res_path <- shared.path(os.use = "windows", group = "RES Data", folder = NULL)
+  
+} else {
+  
+  res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
+  
+}
+
+#Helper functions
+source(here("code", "model_diagnostic_funs.R"))
+
+# Merge predictions with strata as an sf object
+mod_summs_sf <- strata_summs(datdat)
+```
+
+
+### Observed and Predicted
+
+```{r}
+obs_pred_plot(mod_summs_sf, size_facets = TRUE)
+
+```
+
+### Observed - Predicted
+
+```{r}
+strata_diffs_plot(mod_summs_sf, size_facets = TRUE)
+```
+
+# LIME Diagnostics
+
+```{r, eval  = FALSE}
+# library(lime)
+# 
+# class(model)
+# 
+# #Setup lime::model_type() function for keras
+# model_type.keras.engine.training.Model <- function(x, ...) {
+#   
+# }
+# 
+# 
+# # Setup lime::predict_model() function for keras
+# predict_model.keras.engine.training.Model <- function(x, newdata, type, ...) {
+#   pred <- predict(object = x, x = as.matrix(newdata))
+#   data.frame(keras_predictions = pred)
+# }
+# 
+# 
+# # Test our predict_model() function
+# predict_model(x = model, newdata = test_data, type = 'raw') %>%
+#   tibble::as_tibble()
+# 
+# 
+# 
+# #Set up explainer with lime
+# explainer <- lime::lime(
+#   x = as.data.frame(train_data),
+#   model = model
+# )
+# 
+# #Run explainer() on explainer()
+# explanation <- lime::explain(
+#   as.data.frame(test_data)[1:10,], 
+#   explainer    = explainer, 
+#   n_features   = 4,
+#   kernel_width = 0.5
+# )
+```

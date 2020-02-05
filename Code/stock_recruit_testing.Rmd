@@ -9,7 +9,8 @@ params:
   pc: FALSE
   user_name: "mbarajas"
   common_name: "atlantic cod"
-  rebalance: "none"
+  rebalance: "medium"
+  catch_adjust_year: "2013"
 ---
 
 # Setup
@@ -25,6 +26,7 @@ library(sf)
 library(gmRi)
 library(vip)
 library(pdp)
+library(patchwork)
 
 
 #Set appropriate path to box
@@ -43,7 +45,6 @@ if(params$pc == TRUE) {
 #Helper Funs
 source(here("code/data_cleanup_funs.R"))
 source(here("code/data_reshaping_funs.R"))
-source(here("Code", "model_diagnostic_funs.R"))
 
 #GGplot theme
 theme_set(theme_bw())
@@ -235,15 +236,6 @@ a %>%
 # Feature engineering
 
 ## 1. Year Lags
-
-### Spawner Biomass Scenarios
-
-Average age class landings for each region and season are stored in the features with n = 3 year lags. Adjusting those values will need to take place before the lags are made.
-
-Scenarios:   
- * Doubling or halving nlarge biomass at a given 1-3 year period   
- * Similar test, but for one region   
- * And again for a given season
 
 ```{r}
 testing_years <- c(2000:2003)
@@ -454,9 +446,12 @@ val_data <- select(val_ind, c(10:ncol(val_ind)))
 # testing labels and features
 test_labels <- select(test_ind, c("nsmall", "nmedium", "nlarge"))
 test_data <- select(test_ind, c(10:ncol(test_ind)))
+test_data_df <- test_data
 ```
 
 ## 1. Standardize Features
+
+### a. Get Scaling Parameters 
 
 ```{r}
 # Normalize features
@@ -468,6 +463,9 @@ test_data <- select(test_ind, c(10:ncol(test_ind)))
 # 124:135 is R2 temp year i-1 (GB)
 # 137:148 is GoM temp year i
 # 162:173 is GB temp year i
+
+
+#Columns to normalize
 thesecols <- c(1,2,44:91,92:109,111:122,124:135,137:148,162:173)
 thesenames <- colnames(train_data)[thesecols]
 
@@ -502,16 +500,83 @@ val_data <- select(val_data, -thesecols)
 
 # normalize
 sccolsval <- scale(sccolsval, center = col_means_trainval, scale = col_stddevs_trainval)
+```
 
+
+
+
+
+### b. Manipulate un-standardized catch
+
+
+```{r}
+#Objective:
+#Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
+
+#Year can be accesses by looking at where the catch at age values break or by using alldata
+year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+
+#Catch Scenarios
+catch_scenarios <- c(0.25, 0.5, 1, 10, 50, 100, 150, 250, 500)
+
+#Make list containing test data for various scenarios
+test_catch_scenarios <- map(catch_scenarios, function(x){
+  
+  #Adjust 2013 catches
+  new_2013 <- test_data_df[year_labs == params$catch_adjust_year,] %>% 
+    mutate(
+      #Region 1
+       c_r1_age_3     =  c_r1_age_3 * x,
+       c_r1_age_4     =  c_r1_age_4 * x,
+       c_r1_age_5     =  c_r1_age_5 * x,
+       c_r1_age_6     =  c_r1_age_6 * x,
+       c_r1_age_7     =  c_r1_age_7 * x,
+       c_r1_age_8     =  c_r1_age_8 * x,
+       c_r1_age_9plus =  c_r1_age_9plus * x,
+       #Region 2
+       c_r2_age_3     =  c_r2_age_3 * x,
+       c_r2_age_4     =  c_r2_age_4 * x,
+       c_r2_age_5     =  c_r2_age_5 * x,
+       c_r2_age_6     =  c_r2_age_6 * x,
+       c_r2_age_7     =  c_r2_age_7 * x,
+       c_r2_age_8     =  c_r2_age_8 * x,
+       c_r2_age_9plus =  c_r2_age_9plus * x
+      
+    ) 
+  
+  
+  #Same vals for 2014 and 15
+  same_1415 <- test_data_df[year_labs != "2013",] 
+  
+  #Bind them together
+  catch_out <- bind_rows(list("2013" = new_2013, "2014-15" = same_1415))
+  
+  return(catch_out)
+  
+  
+})
+
+#Name the list by the scenario being tested
+names(test_catch_scenarios) <- str_c(catch_scenarios, " * Observed Catch")
+```
+
+
+
+### c. Re-assemble
+
+```{r}
 # put back together
 sccolsval <- as.data.frame(sccolsval)
 colnames(sccolsval) <- thesenames
 val_data <- bind_cols(val_data, sccolsval)
+```
 
+
+```{r standard test data}
 ####  testing data  ####
 # split features to be normalized
 sccolstest <- select(test_data, thesecols)
-test_data <- select(test_data, -thesecols)
+test_data  <- select(test_data, -thesecols)
 
 # normalize
 sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
@@ -521,6 +586,33 @@ sccolstest <- as.data.frame(sccolstest)
 colnames(sccolstest) <- thesenames
 test_data <- bind_cols(test_data, sccolstest)
 
+```
+
+
+```{r catch scenario data}
+
+#Standardize the test catch scenarios
+
+test_catch_scenarios <- test_catch_scenarios %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
 ```
 
 
@@ -584,17 +676,74 @@ val_data <- as.matrix(val_data)
 val_labels <- as.matrix(val_labels)
 
 # testing
+test_data_df <- test_data
 test_data <- as.matrix(test_data)
 test_labels <- as.matrix(test_labels)
 ```
 
 
+### TESTING: Manipulate Standardized Catch Data
 
-
+```{r, eval = FALSE}
+# 
+# # test_data   #Predictors
+# # test_labels #Observed Responses
+# 
+# #Objective:
+# #Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
+# 
+# #Year can be accesses by looking at where the catch at age values break or by using alldata
+# year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+# 
+# #Catch Scenarios
+# catch_scenarios <- c(0.25, 0.5, 1 , 1.5, 2, 5, 10)
+# 
+# 
+# test_catch_scenarios <- map(catch_scenarios, function(x){
+#   
+#   #Adjust 2013 catches
+#   new_2013 <- test_data_df[year_labs == "2013",] %>% 
+#     mutate(
+#       #Region 1
+#        c_r1_age_3     =  c_r1_age_3 * x,
+#        c_r1_age_4     =  c_r1_age_4 * x,
+#        c_r1_age_5     =  c_r1_age_5 * x,
+#        c_r1_age_6     =  c_r1_age_6 * x,
+#        c_r1_age_7     =  c_r1_age_7 * x,
+#        c_r1_age_8     =  c_r1_age_8 * x,
+#        c_r1_age_9plus =  c_r1_age_9plus * x,
+#        #Region 2
+#        c_r2_age_3     =  c_r2_age_3 * x,
+#        c_r2_age_4     =  c_r2_age_4 * x,
+#        c_r2_age_5     =  c_r2_age_5 * x,
+#        c_r2_age_6     =  c_r2_age_6 * x,
+#        c_r2_age_7     =  c_r2_age_7 * x,
+#        c_r2_age_8     =  c_r2_age_8 * x,
+#        c_r2_age_9plus =  c_r2_age_9plus * x
+#       
+#     ) 
+#   
+#   
+#   #Same vals for 2014 and 15
+#   same_1415 <- test_data_df[year_labs != "2013",] 
+#   
+#   #Bind them together
+#   catch_out <- bind_rows(list("2013" = new_2013, "2014-15" = same_1415)) %>% 
+#     as.matrix()
+#   
+#   return(catch_out)
+#   
+#   
+# })
+# 
+# 
+# names(test_catch_scenarios) <- str_c(catch_scenarios, " * Observed Catch")
+```
 
 
 # Keras Model (s)
 
+##  Model Setup
 
 ```{r}
 # keras model
@@ -603,12 +752,18 @@ test_labels <- as.matrix(test_labels)
 inputs <- layer_input(shape = dim(train_data)[2])
 
 # outputs are input + dense layers
-predictions <- inputs%>%
-  layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
-  layer_dropout(0.2)%>%
-  layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
-  layer_dropout(0.2)%>%
-  layer_dense(units=dim(train_labels)[2])
+predictions <- inputs %>%
+  layer_dense(units = dim(train_data)[2], 
+              activation = "relu", 
+              kernel_initializer = "he_normal", 
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = dim(train_data)[2], 
+              activation = "relu", 
+              kernel_initializer = "he_normal", 
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = dim(train_labels)[2])
 
 
 # create model
@@ -619,13 +774,21 @@ model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
   
 # summary
 model %>% summary()
+```
 
+## Train Model
+
+```{r}
 # train model and store training progress learning curves (no validation)
 history <- model %>% fit(train_data, train_labels, epochs = 50, verbose = 1)
 
 # model performance on test set
 eval <- evaluate(model, test_data, test_labels, verbose = 0)
+```
 
+##Make Predictions
+
+```{r}
 # make predictions
 test_predictions <- model %>% predict(test_data)
 
@@ -661,7 +824,7 @@ datdat$observed_large <- datdat$nlarge
 ```
 
 
-# Save model
+## Save model
 ```{r, eval = FALSE}
 ## save ANN model
 # save_model_hdf5(object = model, filepath = here("model_runs", "stockrecruit.h5"))
@@ -679,7 +842,7 @@ datdat$observed_large <- datdat$nlarge
 # write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
 ```
 
-# Load Model Runs
+## Re-Load Model Runs
 
 ```{r, eval = FALSE}
 # # load saved model
@@ -705,8 +868,168 @@ datdat$observed_large <- datdat$nlarge
 ```
 
 
+# Assessing Catch Scenarios
 
-# Model Diagnostics
+```{r}
+
+#Get Predictions for each catch scenario
+test_catch_predictions <- map(test_catch_scenarios, function(x) {
+  # make predictions
+  test_predictions <- model %>% predict(x)
+  
+  # back transform
+  test_predictions <- round(exp(test_predictions) -1, 2)
+  test_predictions <- as.data.frame(test_predictions)
+  names(test_predictions) <- c("predicted_small", "predicted_medium", "predicted_large")
+  
+  
+  
+  #Add other factors
+  year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+  area_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(AREA)
+  season_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(SEASON)
+  stratum_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(stratum)
+  
+  
+  #And Actual Data
+  observed_data <- data.frame(
+    observed_small   = as.numeric(true_labels[,1]),
+    observed_medium  = as.numeric(true_labels[,2]),
+    observed_large   = as.numeric(true_labels[,3])
+  )
+  
+  #Add station info back in
+  test_predictions <- bind_cols(year_labs,
+                                area_labs,
+                                season_labs,
+                                stratum_labs,
+                                observed_data,
+                                test_predictions)
+  
+  return(test_predictions)
+
+})
+
+
+#Coalesce into a single dataframe for plotting
+test_catch_predictions <- test_catch_predictions %>% bind_rows(.id = "catch scenario") %>% 
+  mutate(`catch scenario` = factor(`catch scenario`, levels = str_c(catch_scenarios, " * Observed Catch")),
+         SEASON = factor(SEASON, levels = c("SPRING", "FALL")))
+
+```
+
+## Predicted Size Classes
+
+```{r}
+
+#Plotting the different predicted size classes
+small_plot <- ggplot(test_catch_predictions, 
+                     aes(as.factor(EST_YEAR), predicted_small, color = `catch scenario`)) +
+  geom_boxplot() + 
+  labs(x = NULL, y = "Predicted N-Small", 
+       title = str_c("Adjusted", params$catch_adjust_year, "Commercial Landings of 3+ Age Fish"),
+       subtitle = str_c("Impacts on predicted size classes \nRebalanced by sizeclass : ", params$rebalance)) +
+  facet_wrap(~SEASON) + 
+  theme(legend.position = "none")
+
+medium_plot <- ggplot(test_catch_predictions, 
+                      aes(as.factor(EST_YEAR), predicted_medium, color = `catch scenario`)) +
+  geom_boxplot() + labs(x = NULL, y = "Predicted N-Medium") +
+  facet_wrap(~SEASON) + 
+  theme(legend.position = "none")
+
+large_plot <- ggplot(test_catch_predictions, 
+                     aes(as.factor(EST_YEAR), predicted_large, color = `catch scenario`)) +
+  geom_boxplot() + labs(x = NULL, y = "Predicted N-Large") +
+  facet_wrap(~SEASON) +
+  guides(color = guide_legend(title = "2012 Catch Adjustment", title.hjust = 0.5, title.position = "top")) +
+  theme(legend.position = "bottom")
+
+
+#Plot all 3 together
+small_plot / medium_plot / large_plot
+
+
+
+```
+
+
+
+## Catch Scenario Spatial Patterns
+
+```{r, eval = FALSE}
+# ####  Load Model Prediction Data  ####
+# # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+# 
+# #Set appropriate path to box
+# if(params$pc == TRUE) {
+#   # MB setup
+# 
+#   user.name <- params$user_name
+# 
+#   res_path <- shared.path(os.use = "windows", group = "RES Data", folder = NULL)
+#   
+# } else {
+#   
+#   res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
+#   
+# }
+# 
+# ####  Load Strata Shapefiles  ####
+# survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))
+# 
+# ####  Join with Strata Geometries  ####
+# 
+# #Do group summaries
+# catch_scenarios_sf <- test_catch_predictions %>% 
+#   mutate(
+#       #STRATUMA = str_c("0", stratum), 
+#       STRATA = as.integer(stratum),
+#       stratum = NULL) %>% 
+#     group_by(`catch scenario`, EST_YEAR, SEASON, STRATA) %>% 
+#     summarise(
+#       obs_small = mean(observed_small, na.rm = T),
+#       obs_medium = mean(observed_medium, na.rm = T),
+#       obs_large = mean(observed_large, na.rm = T),
+#       pred_small = mean(predicted_small, na.rm = T),
+#       pred_medium = mean(predicted_medium, na.rm = T),
+#       pred_large = mean(predicted_large, na.rm = T),
+#       diff_small = obs_small - pred_small,
+#       diff_medium = obs_medium - pred_medium,
+#       diff_large = obs_large - pred_large
+#       ) %>% 
+#     ungroup() %>% 
+#     pivot_longer(names_to = "source", values_to = "abundance", obs_small:diff_large) %>% 
+#     mutate(
+#       size = ifelse(str_detect(source, "small"), "small", ifelse(str_detect(source, "medium"), "medium", "large")),
+#       type = ifelse(str_detect(source, "obs"), "observed", ifelse(str_detect(source, "diff"), "obs - pred", "predicted")),
+#       size = factor(size, levels = c("small", "medium", "large")),
+#       type = factor(type, levels = c("observed", "predicted", "obs - pred"))
+#       )
+# 
+# #Make it an sf object
+# catch_scenarios_sf <- survey_strata %>% inner_join(catch_scenarios_sf, by = "STRATA")
+# 
+# 
+# #Plot Predictions
+# catch_scenarios_sf %>% 
+#   filter(
+#     `catch scenario` == "500 * Observed Catch",
+#     str_detect(source, "pred"),
+#          SEASON == "SPRING",
+#          EST_YEAR == 2013,
+#          size == "large") %>% 
+#   ggplot() +
+#   geom_sf(aes(fill = abundance)) +
+#   facet_grid( `catch scenario` ~ .) +
+#   guides(fill = guide_colorbar(title.hjust = 0.5, title.position = "top")) +
+#   theme(legend.position = "bottom")
+
+
+```
+
+
+# General Model Diagnostics
 
 ## 1. Observed vs. Predicted
 
@@ -800,17 +1123,14 @@ datdat %>%
 ```
 
 
-## 3. Stock Recruit Relationship
 
-
-
-
-
-## 4. Strata Plots {.tabset .tabset-pills}
+## 3. Strata Plots {.tabset .tabset-pills}
 
 ```{r}
 ####  Load Model Prediction Data  ####
 # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+
+
 
 #Set appropriate path to box
 if(params$pc == TRUE) {
@@ -826,6 +1146,8 @@ if(params$pc == TRUE) {
   
 }
 
+#Helper functions
+source(here("code", "model_diagnostic_funs.R"))
 
 # Merge predictions with strata as an sf object
 mod_summs_sf <- strata_summs(datdat)
@@ -836,6 +1158,7 @@ mod_summs_sf <- strata_summs(datdat)
 
 ```{r}
 obs_pred_plot(mod_summs_sf, size_facets = TRUE)
+
 ```
 
 ### Observed - Predicted
@@ -844,4 +1167,43 @@ obs_pred_plot(mod_summs_sf, size_facets = TRUE)
 strata_diffs_plot(mod_summs_sf, size_facets = TRUE)
 ```
 
+# LIME Diagnostics
 
+```{r, eval  = FALSE}
+# library(lime)
+# 
+# class(model)
+# 
+# #Setup lime::model_type() function for keras
+# model_type.keras.engine.training.Model <- function(x, ...) {
+#   
+# }
+# 
+# 
+# # Setup lime::predict_model() function for keras
+# predict_model.keras.engine.training.Model <- function(x, newdata, type, ...) {
+#   pred <- predict(object = x, x = as.matrix(newdata))
+#   data.frame(keras_predictions = pred)
+# }
+# 
+# 
+# # Test our predict_model() function
+# predict_model(x = model, newdata = test_data, type = 'raw') %>%
+#   tibble::as_tibble()
+# 
+# 
+# 
+# #Set up explainer with lime
+# explainer <- lime::lime(
+#   x = as.data.frame(train_data),
+#   model = model
+# )
+# 
+# #Run explainer() on explainer()
+# explanation <- lime::explain(
+#   as.data.frame(test_data)[1:10,], 
+#   explainer    = explainer, 
+#   n_features   = 4,
+#   kernel_width = 0.5
+# )
+```

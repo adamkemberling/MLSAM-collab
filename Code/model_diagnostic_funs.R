@@ -2,12 +2,14 @@
 library(tidyverse)
 library(sf)
 library(gmRi)
+library(rnaturalearth)
 
 ####  Load Model Prediction Data  ####
 #mod_preds  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
 
 ####  Load Strata Shapefiles  ####
 survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))
+new_england <- ne_states("united states of america") %>% st_as_sf(crs = 4326) %>% filter(region == "Northeast")
 
 
 ####  Reshape Data for Plotting  ####
@@ -61,6 +63,9 @@ obs_pred_plot <- function(mod_summs_sf, size_facets = TRUE) {
         facet_wrap(type ~ size) +
         guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = 10)) +
         theme(legend.position = "bottom")
+    
+    return(plot_out)
+    
   } else {
     
     plot_list <- data_facets %>% 

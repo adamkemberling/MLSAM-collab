@@ -6,7 +6,7 @@ output: html_document
 editor_options: 
   chunk_output_type: console
 params:
-  pc: FALSE
+  pc: TRUE
   user_name: "mbarajas"
   common_name: "atlantic cod"
 ---
@@ -397,9 +397,33 @@ alldata <- left_join(alldata, SST, by = c("EST_YEAR" = "year"))
 # complete cases only
 alldata <- alldata[complete.cases(alldata),]
 
+```
+
+# Catch plots
+
+```{r}
+# catch
+mylabeller<-as_labeller(c("r1"="GoM","r2"="GB"))
+#png(filename="Catch.png",width=6,height=4,units="in",res=300)
+alldata%>%
+  select(c(2,3,4,101:118))%>%
+  pivot_longer(
+    cols = 4:21,
+    names_to = c("type","area","x","age"),
+    names_patter = "(.*)_(.*)_(.*)_(.*)",
+    values_to = "value"
+  )%>%
+  ggplot(aes(x=EST_YEAR,y=value,color=age))+
+  geom_line()+
+  labs(y="Prior year catch")+
+  facet_wrap(area~.,ncol=1,labeller=mylabeller)
+#dev.off()
+```
+
+```{r,message=FALSE}
 # split years into train/test (no validation)
 train_years <- c(1985:2012)
-val_years <- NULL
+val_years <- c(2013:2015)
 test_years <- c(2013:2015)
 
 # 1985-2012 as training data
@@ -457,6 +481,12 @@ sccolstrain <- as.data.frame(sccolstrain)
 colnames(sccolstrain) <- thesenames
 train_data <- bind_cols(train_data,sccolstrain)
 
+# columns numbers for features that change on a yearly time step
+# starts at 42:69
+# skip 70 (TOWDUR) and 71 (AVGDEPTH)
+# continues at 72 all the way to the last column 185
+length(colnames(train_data)[c(42:69,72:185)]) # 142 columns required
+
 ####  validation data  ####
 # split features to be normalized
 sccolsval <- select(val_data, thesecols)
@@ -470,6 +500,17 @@ sccolsval <- as.data.frame(sccolsval)
 colnames(sccolsval) <- thesenames
 val_data <- bind_cols(val_data, sccolsval)
 
+# gaussian noise parameters
+noise_mean<-0
+noise_sd<-0.05
+
+# gaussian noise matrix
+noise<-matrix(rnorm(nrow(val_data)*142,mean=noise_mean,sd=noise_sd),nrow=nrow(val_data))
+
+# add noise
+val_data[,c(42:69)]<-val_data[,c(42:69)]+noise[,c(1:28)]
+val_data[,c(72:185)]<-val_data[,c(72:185)]+noise[,c(29:142)]
+
 ####  testing data  ####
 # split features to be normalized
 sccolstest <- select(test_data, thesecols)
@@ -482,6 +523,13 @@ sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs
 sccolstest <- as.data.frame(sccolstest)
 colnames(sccolstest) <- thesenames
 test_data <- bind_cols(test_data, sccolstest)
+
+# gaussian noise matrix
+noise<-matrix(rnorm(nrow(test_data)*142,mean=noise_mean,sd=noise_sd),nrow=nrow(test_data))
+
+# add noise
+test_data[,c(42:69)]<-test_data[,c(42:69)]+noise[,c(1:28)]
+test_data[,c(72:185)]<-test_data[,c(72:185)]+noise[,c(29:142)]
 
 # oversample rare instances in training data (observations with high abundance in medium size class)
 # bind train_labels with train_data
@@ -498,6 +546,13 @@ bal <- ImpSampRegress(nmedium~., imbal, rel = rel, O = 5, U = 0.5)
 # split labels and features
 train_labels <- bal[,c(1,2,3)]
 train_data <- bal[,c(4:ncol(bal))]
+
+# rebalanced training gaussian noise matrix
+noise<-matrix(rnorm(nrow(train_data)*142,mean=noise_mean,sd=noise_sd),nrow=nrow(train_data))
+
+# add noise
+train_data[,c(42:69)]<-train_data[,c(42:69)]+noise[,c(1:28)]
+train_data[,c(72:185)]<-train_data[,c(72:185)]+noise[,c(29:142)]
 
 # log transform labels
 train_labels <- log(train_labels + 1)
@@ -524,32 +579,45 @@ test_labels <- as.matrix(test_labels)
 # input layer
 inputs <- layer_input(shape = dim(train_data)[2])
 
-# outputs are input + dense layers
-predictions <- inputs%>%
+# two hiddent layers with dropout
+hidden <- inputs%>%
   layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
   layer_dropout(0.2)%>%
   layer_dense(units=dim(train_data)[2],activation="relu",kernel_initializer="he_normal",bias_initializer="he_uniform")%>%
-  layer_dropout(0.2)%>%
-  layer_dense(units=dim(train_labels)[2])
+  layer_dropout(0.2)
 
+# output for small size class
+small_output <- hidden %>% layer_dense(units=1,name="sml_out")
+
+# output for medium size class
+medium_output <- hidden %>% layer_dense(units=1,name="med_out")
+
+# output for large size class
+large_output <- hidden %>% layer_dense(units=1,name="lrg_out")
 
 # create model
-model <- keras_model(inputs = inputs, outputs = predictions)
+model <- keras_model(inputs = inputs, outputs = c(small_output,medium_output,large_output))
 
 # compile
-model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
+model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse", loss_weights = list(sml_out=1,med_out=1,lrg_out=1))
   
 # summary
 model %>% summary()
 
 # train model and store training progress learning curves (no validation)
-history <- model %>% fit(train_data, train_labels, epochs = 50, verbose = 1)
+history <- model %>% fit(train_data, y=list(sml_out=train_labels[,1],
+                                            med_out=train_labels[,2],
+                                            lrg_out=train_labels[,3]),
+                                            epochs = 50, verbose = 1)
 
 # model performance on test set
-eval <- evaluate(model, test_data, test_labels, verbose = 0)
+eval <- evaluate(model, test_data, y=list(sml_out=test_labels[,1],
+                                          med_out=test_labels[,2],
+                                          lrg_out=test_labels[,3]), verbose = 0)
 
 # make predictions
 test_predictions <- model %>% predict(test_data)
+test_predictions<-cbind(test_predictions[[1]],test_predictions[[2]],test_predictions[[3]])
 
 # back transform
 test_predictions <- round(exp(test_predictions) -1, 2)
@@ -574,7 +642,6 @@ eval
 resdat <- results
 resdat$ID <- test_ind$ID
 datdat <- left_join(alldata[,1:9], resdat, by="ID")
-
 
 # carry over n abundance columns to observed abundance columns to resolve left_join NAs
 datdat$observed_small <- datdat$nsmall
@@ -682,6 +749,7 @@ datdat %>%
 ```
 
 # Save model
+
 ```{r}
 # save ANN model
 save_model_hdf5(object = model, filepath = here("model_runs", "onemodel.h5"))
@@ -690,14 +758,19 @@ save_model_hdf5(object = model, filepath = here("model_runs", "onemodel.h5"))
 write_csv(datdat, here("predictions20132015.csv"), col_names = TRUE)
 
 # save training labels and features after features have been scaled
-#write_csv(imbal,"training.csv")
+write_csv(imbal,"training.csv")
 
 # save testing labels and features after features have been scaled
-#write_csv(bind_cols(test_labels,test_data),"testing.csv")
+write_csv(x=bind_cols(as.data.frame(test_labels),as.data.frame(test_data)),"testing.csv")
+
+# save testing labels and features before features have been scaled
+write_csv(bind_cols(test_ind),"testing_notscaled.csv")
 
 # save scaling means and stdevs
-#write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
+write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
 ```
+
+# Load model
 
 ```{r, eval = FALSE}
 # load saved model
@@ -712,6 +785,9 @@ training<-read_csv("training.csv")
 # load testing
 testing<-read_csv("testing.csv")
 
+# load testing not scaled
+test_ind<-read_csv("testing_notscaled.csv")
+
 # load scaling means and stdevs
 scaling<-read_csv("feature_means_stdevs.csv")
 
@@ -721,6 +797,125 @@ feat_mns<-scaling[1,]
 # second row are stdevs
 feat_stdevs<-scaling[2,]
 ```
+
+# increase prior year abundance then compare predictions
+
+```{r, eval = FALSE}
+
+# adjust prior year abundance in large fish and rerun predictions for test data
+
+# testing labels and features
+test_labels <- select(test_ind, c(7,8,9))
+test_data <- select(test_ind, c(10:ncol(test_ind)))
+
+# multiply prior year abundance for large fish by constant multiplyer
+colnames(test_data)
+colnames(test_data)[c(58,61,64,67)]
+test_data[,c(58,61,64,67)]<-test_data[,c(58,61,64,67)]*10
+
+# Normalize features relative to training data
+# 1 is TOWDUR
+# 2 is AVGDEPTH
+# 44:91 is stratified mean abundance year i and year i-1,i-2,i-3
+# 92:109 is catch
+# 111:122 is R1 temp year i-1 (GoM)
+# 124:135 is R2 temp year i-1 (GB)
+# 137:148 is GoM temp year i
+# 162:173 is GB temp year i
+thesecols <- c(1,2,44:91,92:109,111:122,124:135,137:148,162:173)
+thesenames <- colnames(test_data)[thesecols]
+
+####  testing data  ####
+# split features to be normalized
+sccolstest <- select(test_data, thesecols)
+test_data <- select(test_data, -thesecols)
+
+# normalize
+sccolstest <- scale(sccolstest, center = feat_mns, scale = feat_stdevs)
+
+# put back together
+sccolstest <- as.data.frame(sccolstest)
+colnames(sccolstest) <- thesenames
+test_data <- bind_cols(test_data, sccolstest)
+
+# gaussian noise parameters
+noise_mean<-0
+noise_sd<-0.05
+
+# gaussian noise matrix
+noise<-matrix(rnorm(nrow(test_data)*142,mean=noise_mean,sd=noise_sd),nrow=nrow(test_data))
+
+# add noise
+test_data[,c(42:69)]<-test_data[,c(42:69)]+noise[,c(1:28)]
+test_data[,c(72:185)]<-test_data[,c(72:185)]+noise[,c(29:142)]
+
+# log transform labels
+test_labels <- log(test_labels + 1)
+
+# testing
+test_data <- as.matrix(test_data)
+test_labels <- as.matrix(test_labels)
+
+####################################################################################
+
+# make predictions
+test_predictions <- model%>%predict(test_data)
+test_predictions<-cbind(test_predictions[[1]],test_predictions[[2]],test_predictions[[3]])
+
+# back transform
+test_predictions <- round(exp(test_predictions) -1, 2)
+true_labels <- round(exp(test_labels) -1, 2)
+
+# combine observed values and predictions
+results <- data.frame(
+  observed_small   = as.numeric(true_labels[,1]),
+  observed_medium  = as.numeric(true_labels[,2]),
+  observed_large   = as.numeric(true_labels[,3]),
+  predicted_small  = as.numeric(test_predictions[,1]),
+  predicted_medium = as.numeric(test_predictions[,2]),
+  predicted_large  = as.numeric(test_predictions[,3]))
+
+# reshape prediction results for time series plots
+resdat <- results
+resdat<-bind_cols(test_ind[,1:6],resdat)
+
+# save 
+write_csv(resdat,"predictions20132015_10x_i1_lrg.csv")
+
+```
+
+# change prior year abundance large fish comparison
+
+```{r}
+
+results_1x<-read_csv("predictions20132015_1x_i1_lrg.csv")
+
+results_2x<-read_csv("predictions20132015_2x_i1_lrg.csv")
+
+results_5x<-read_csv("predictions20132015_5x_i1_lrg.csv")
+
+results_10x<-read_csv("predictions20132015_10x_i1_lrg.csv")
+
+res<-bind_cols(results_1x,results_2x[,c(10,11,12)],results_5x[,c(10,11,12)],results_10x[,c(10,11,12)])
+
+colnames(res)[10:21]<-c("small_1x","medium_1x","large_1x",
+                        "small_2x","medium_2x","large_2x",
+                        "small_5x","medium_5x","large_5x",
+                        "small_10x","medium_10x","large_10x")
+
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
+  summarise(abundance = sum(value)) %>%
+  ggplot(aes(x = factor(scenario, levels = c("1x", "2x", "5x", "10x")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "prior year large abundance scenarios")+
+  scale_fill_discrete("size")
+
+```
+
 
 # Strata Plots {.tabset .tabset-pills}
 
@@ -774,24 +969,25 @@ strata_diffs_plot(mod_summs_sf)
 # prediction function wrapper, two arguments: object (the fitted model) and newdata
 # The function needs to return a vector of predictions (one for each observation)
 pred_wrapper <- function(object,newdata){
-  predict(object,x=as.matrix(newdata))[,2]%>% # column 2 is medium size class
+  predict(object,x=as.matrix(newdata))[[2]]%>% # list 2 is medium size class
   as.vector()
 }
 
-# use training data prior to resampling
+
 orig_train_labels <- training[,c(1,2,3)]
 orig_train_data <- training[,c(4:ncol(training))]
 
-# log transform labels
-orig_train_labels<-log(orig_train_labels+1)
+# use training data after resampling and adding noise and after log transform
+#the_train_labels <- train_labels
+#the_train_data <- train_data
 
 # permutation-based VIP for the fitted network
 p1 <- vip(object=model,                        # fitted model
         method="permute",                      # permutation-based VI scores
         num_features=10,                       # plots top 10 features
         pred_wrapper=pred_wrapper,             # user-defined prediction function
-        train=as.data.frame(orig_train_data) , # training data
-        target=orig_train_labels[,2],          # response values used for training (column 2 is medium size class)
+        train=as.data.frame(the_train_data) , # training data
+        target=the_train_labels[,2],          # response values used for training (column 2 is medium size class)
         metric="mse",                          # evaluation metric
         progress="text")                       # request a text-based progress bar
 
@@ -801,15 +997,15 @@ p1
 # all features
 p1all <- vip(object=model,
              method="permute",
-             num_features=dim(orig_train_data)[2],
+             num_features=dim(the_train_data)[2],
              pred_wrapper=pred_wrapper,
-             train=as.data.frame(orig_train_data),
-             target=orig_train_labels[,2],
+             train=as.data.frame(the_train_data),
+             target=the_train_labels[,2],
              metric="mse",
              progress="text")
 
 # save image
-png(filename="vip_allfeatures.png",width=5,height=20,units="in",res=300)
+png(filename="vip_allfeatures_resample_noise.png",width=5,height=20,units="in",res=300)
 p1all
 dev.off()
 ```
@@ -827,19 +1023,19 @@ dev.off()
 p2 <- partial(object=model,
             pred.var="AVGDEPTH",
             pred.fun=pred_wrapper,
-            train=as.data.frame(orig_train_data))
+            train=as.data.frame(the_train_data))
 
 # use anom feature
 p3 <- partial(object=model,
             pred.var="anom",
             pred.fun=pred_wrapper,
-            train=as.data.frame(orig_train_data))
+            train=as.data.frame(the_train_data))
 
 # use anom10 feature
 p4 <- partial(object=model,
             pred.var="anom10",
             pred.fun=pred_wrapper,
-            train=as.data.frame(orig_train_data))
+            train=as.data.frame(the_train_data))
 
 # before unscale and back-transformation
 png(filename="ICE_curves.png",width=10,height=5,units="in",res=300)
@@ -874,7 +1070,7 @@ dev.off()
 
 # modify wrapper to return average prediction across all observations
 pred_wrapper <- function(object,newdata){
-  predict(object,x=as.matrix(newdata))[,2]%>% # column 2 is medium size class
+  predict(object,x=as.matrix(newdata))[[2]]%>% # list 2 is medium size class
   as.vector()%>%
   mean()
 }
@@ -884,7 +1080,7 @@ p5 <- partial(object=model,
             pred.var=c("AVGDEPTH","anom"),
             chull=TRUE,                       # restrict predictions to region of joint values
             pred.fun=pred_wrapper,
-            train=as.data.frame(orig_train_data))
+            train=as.data.frame(the_train_data))
 
 # before unscale and back-transformation
 p5%>%autoplot()
@@ -908,7 +1104,7 @@ dev.off()
 # prediction function wrapper, two arguments: object (the fitted model) and newdata
 # The function needs to return a vector of predictions (one for each observation)
 pred_wrapper <- function(object,newdata){
-  predict(object,x=as.matrix(newdata))[,2]%>% # column 2 is medium size class
+  predict(object,x=as.matrix(newdata))[[2]]%>% # list 2 is medium size class
   as.vector()
 }
 
@@ -918,13 +1114,18 @@ pred_wrapper <- function(object,newdata){
 p6 <- partial(object=model,
             pred.var="c_r2_age_5",
             pred.fun=pred_wrapper,
-            train=as.data.frame(orig_train_data))
+            train=as.data.frame(the_train_data))
+
+col_means_trainval
+col_stddevs_trainval[ind]
 
 # find column index to unscale
-ind<-which(colnames(feat_mns)=="c_r2_age_5")
+ind<-which(names(col_means_trainval)=="c_r2_age_5")
+#ind<-which(colnames(feat_mns)=="c_r2_age_5")
 
 # unscale if it was scaled
-p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(feat_stdevs[,ind]))+as.numeric(feat_mns[,ind])
+p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(col_stddevs_trainval[ind]))+as.numeric(col_means_trainval[ind])
+#p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(feat_stdevs[,ind]))+as.numeric(feat_mns[,ind])
 
 # back transform predictions
 p6$yhat <- exp(p6$yhat)-1
@@ -937,82 +1138,4 @@ dev.off()
 # find ids with top 5 highest prediction at lower range of catch
 top_ind<-unique(p6$yhat.id[which(p6$yhat>400)]) # 3608 5336 5599 5902 6391
 bind_cols(datdat[top_ind,1:9],training[top_ind,c(74,4,5)])
-```
-
-# increase catch and compare predictions
-
-```{r, eval = FALSE}
-
-# adjust catch in large fish (age-5 and above) and rerun predictions for test data
-
-# testing labels and features
-test_labels <- select(testing,c(1,2,3)) 
-test_data <- select(testing,c(4:ncol(testing)))
-
-# increase catch for both regions age-5 and above by 5x
-colnames(test_data)[c(124:128,133:137)]
-colnames(feat_mns)[c(55:59,64:68)]
-colnames(feat_stdevs)[c(55:59,64:68)]
-
-# unscale
-w<-t((t(test_data[,c(124:128,133:137)])*as.numeric(feat_stdevs[,c(55:59,64:68)]))+as.numeric(feat_mns[,c(55:59,64:68)]))
-
-# 5x catch
-w<-w*5
-
-# scale back
-w<-
-
-# log transform labels
-test_labels <- log(test_labels+1)
-
-# convert to matrix
-# testing
-test_data <- as.matrix(test_data)
-test_labels <- as.matrix(test_labels)
-
-# make predictions
-test_predictions <- model%>%predict(test_data)
-
-# model performance on test set
-eval2 <- evaluate(model,test_data,test_labels,verbose=0)
-
-# back transform
-test_predictions <- round(exp(test_predictions)-1,2)
-true_labels <- round(exp(test_labels)-1,2)
-
-# combine observed values and predictions
-results <- data.frame(observed_small=as.numeric(true_labels[,1]),
-                    observed_medium=as.numeric(true_labels[,2]),
-                    observed_large=as.numeric(true_labels[,3]),
-                    predicted_small=as.numeric(test_predictions[,1]),
-                    predicted_medium=as.numeric(test_predictions[,2]),
-                    predicted_large=as.numeric(test_predictions[,3]))
-
-
-
-# mean squared error
-eval2
-
-# reshape prediction results for time series plots
-resdat<-results
-resdat$ID <- test_ind$ID
-datdat2 <- left_join(alldata[,1:9],resdat,by="ID")
-
-# carry over n abundance columns to observed abundance columns to resolve left_join NAs
-datdat2$observed_small<-datdat$nsmall
-datdat2$observed_medium<-datdat$nmedium
-datdat2$observed_large<-datdat$nlarge
-
-# compare predictions with catch and catch*5
-bothresults<-cbind(datdat[6872:7764,13:15],datdat2[6872:7764,13:15])
-
-plot(bothresults[,4]~bothresults[,1],xlim=c(0,10),ylim=c(0,10))
-abline(a=0,b=1)
-
-plot(bothresults[,5]~bothresults[,2],xlim=c(0,80),ylim=c(0,80))
-abline(a=0,b=1)
-
-plot(bothresults[,6]~bothresults[,3],xlim=c(0,25),ylim=c(0,25))
-abline(a=0,b=1)
 ```

@@ -2,7 +2,12 @@
 title: "Spawn Recruit Testing"
 author: "Adam A. Kemberling"
 date: "`r Sys.Date()`"
-output: html_document
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    code_folding: show
 editor_options: 
   chunk_output_type: console
 params:
@@ -10,12 +15,16 @@ params:
   user_name: "mbarajas"
   common_name: "atlantic cod"
   rebalance: "medium"
-  catch_adjust_year: "2013"
+  catch_adjust_year: "2014"
 ---
 
 # Setup
 
 ```{r,warning=FALSE,message=FALSE}
+
+#Global knit options
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
 # Libraries
 library(tidyverse)
 library(here)
@@ -451,7 +460,7 @@ test_data_df <- test_data
 
 ## 1. Standardize Features
 
-### a. Get Scaling Parameters 
+### Get Scaling Parameters 
 
 ```{r}
 # Normalize features
@@ -506,7 +515,7 @@ sccolsval <- scale(sccolsval, center = col_means_trainval, scale = col_stddevs_t
 
 
 
-### b. Manipulate un-standardized catch
+### Manipulate un-standardized catch
 
 
 ```{r}
@@ -519,50 +528,126 @@ year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
 #Catch Scenarios
 catch_scenarios <- c(0.25, 0.5, 1, 10, 50, 100, 150, 250, 500)
 
-#Make list containing test data for various scenarios
-test_catch_scenarios <- map(catch_scenarios, function(x){
+#Make lists containing test data for various scenarios
+
+
+
+#2013 Adjustments
+#test_catch_scenarios <- map(catch_scenarios, function(x){
+catch_scenarios_13 <- map(catch_scenarios, function(x){
   
-  #Adjust 2013 catches
-  new_2013 <- test_data_df[year_labs == params$catch_adjust_year,] %>% 
-    mutate(
-      #Region 1
-       c_r1_age_3     =  c_r1_age_3 * x,
-       c_r1_age_4     =  c_r1_age_4 * x,
-       c_r1_age_5     =  c_r1_age_5 * x,
-       c_r1_age_6     =  c_r1_age_6 * x,
-       c_r1_age_7     =  c_r1_age_7 * x,
-       c_r1_age_8     =  c_r1_age_8 * x,
-       c_r1_age_9plus =  c_r1_age_9plus * x,
-       #Region 2
-       c_r2_age_3     =  c_r2_age_3 * x,
-       c_r2_age_4     =  c_r2_age_4 * x,
-       c_r2_age_5     =  c_r2_age_5 * x,
-       c_r2_age_6     =  c_r2_age_6 * x,
-       c_r2_age_7     =  c_r2_age_7 * x,
-       c_r2_age_8     =  c_r2_age_8 * x,
-       c_r2_age_9plus =  c_r2_age_9plus * x
-      
-    ) 
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2013",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )
+  
+    #Same vals for 2014 and 15
+    y2014 <- test_data_df[year_labs == "2014",] 
+    y2015 <- test_data_df[year_labs == "2015",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(adjusted_year, y2014, y2015)
+    return(catch_out)
+  
+  })
+
+#2014
+catch_scenarios_14 <- map(catch_scenarios, function(x){
+  
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2014",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )
+  
+    #Same vals for 2014 and 15
+    y2013 <- test_data_df[year_labs == "2013",] 
+    y2015 <- test_data_df[year_labs == "2015",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(y2013, adjusted_year, y2015)
+    return(catch_out)
+  
+  })
+
+#2015
+catch_scenarios_15 <- map(catch_scenarios, function(x){
+  
+  #Adjust catches for target year
+  adjusted_year <- test_data_df[year_labs == "2015",] %>% 
+      mutate(
+        #Region 1
+         c_r1_age_3     =  c_r1_age_3 * x,
+         c_r1_age_4     =  c_r1_age_4 * x,
+         c_r1_age_5     =  c_r1_age_5 * x,
+         c_r1_age_6     =  c_r1_age_6 * x,
+         c_r1_age_7     =  c_r1_age_7 * x,
+         c_r1_age_8     =  c_r1_age_8 * x,
+         c_r1_age_9plus =  c_r1_age_9plus * x,
+         #Region 2
+         c_r2_age_3     =  c_r2_age_3 * x,
+         c_r2_age_4     =  c_r2_age_4 * x,
+         c_r2_age_5     =  c_r2_age_5 * x,
+         c_r2_age_6     =  c_r2_age_6 * x,
+         c_r2_age_7     =  c_r2_age_7 * x,
+         c_r2_age_8     =  c_r2_age_8 * x,
+         c_r2_age_9plus =  c_r2_age_9plus * x
+        
+      )    
+      #Same vals for 2014 and 15
+    y2013 <- test_data_df[year_labs == "2013",] 
+    y2014 <- test_data_df[year_labs == "2014",] 
+    
+    #Bind them together
+    catch_out <- bind_rows(y2013, y2014, adjusted_year)
+    return(catch_out)
+  })
   
   
-  #Same vals for 2014 and 15
-  same_1415 <- test_data_df[year_labs != "2013",] 
-  
-  #Bind them together
-  catch_out <- bind_rows(list("2013" = new_2013, "2014-15" = same_1415))
-  
-  return(catch_out)
-  
-  
-})
+
 
 #Name the list by the scenario being tested
-names(test_catch_scenarios) <- str_c(catch_scenarios, " * Observed Catch")
+names(catch_scenarios_13) <- str_c(catch_scenarios, " * Observed Catch")
+names(catch_scenarios_14) <- str_c(catch_scenarios, " * Observed Catch")
+names(catch_scenarios_15) <- str_c(catch_scenarios, " * Observed Catch")
 ```
 
 
 
-### c. Re-assemble
+### Re-assemble
 
 ```{r}
 # put back together
@@ -593,7 +678,52 @@ test_data <- bind_cols(test_data, sccolstest)
 
 #Standardize the test catch scenarios
 
-test_catch_scenarios <- test_catch_scenarios %>% map(function(x){
+#2014 Adjustments
+catch_scenarios_13 <- catch_scenarios_13 %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
+
+#2014 Adjustments
+catch_scenarios_14 <- catch_scenarios_14 %>% map(function(x){
+  
+  # split features to be normalized
+  sccolstest <- select(x, thesecols)
+  x <- select(x, -thesecols)
+  
+  # normalize
+  sccolstest <- scale(sccolstest, center = col_means_trainval, scale = col_stddevs_trainval)
+  
+  # put back together
+  sccolstest <- as.data.frame(sccolstest)
+  colnames(sccolstest) <- thesenames
+  x <- bind_cols(x, sccolstest)
+  
+  #Convert to a matrix
+  x <- as.matrix(x)
+  
+  return(x)
+  
+})
+
+#2015 Adjustments
+catch_scenarios_15 <- catch_scenarios_15 %>% map(function(x){
   
   # split features to be normalized
   sccolstest <- select(x, thesecols)
@@ -743,7 +873,7 @@ test_labels <- as.matrix(test_labels)
 
 # Keras Model (s)
 
-##  Model Setup
+###  Model Setup
 
 ```{r}
 # keras model
@@ -776,7 +906,7 @@ model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
 model %>% summary()
 ```
 
-## Train Model
+### Train Model
 
 ```{r}
 # train model and store training progress learning curves (no validation)
@@ -786,7 +916,7 @@ history <- model %>% fit(train_data, train_labels, epochs = 50, verbose = 1)
 eval <- evaluate(model, test_data, test_labels, verbose = 0)
 ```
 
-##Make Predictions
+### Make Predictions
 
 ```{r}
 # make predictions
@@ -824,7 +954,7 @@ datdat$observed_large <- datdat$nlarge
 ```
 
 
-## Save model
+### Save model
 ```{r, eval = FALSE}
 ## save ANN model
 # save_model_hdf5(object = model, filepath = here("model_runs", "stockrecruit.h5"))
@@ -842,7 +972,7 @@ datdat$observed_large <- datdat$nlarge
 # write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),"feature_means_stdevs.csv")
 ```
 
-## Re-Load Model Runs
+### Re-Load Model Runs
 
 ```{r, eval = FALSE}
 # # load saved model
@@ -870,7 +1000,16 @@ datdat$observed_large <- datdat$nlarge
 
 # Assessing Catch Scenarios
 
-```{r}
+```{r fig.height = 8}
+
+# #Manual switching between years
+# params$catch_adjust_year <- "2013"
+
+#Parameter Toggle for focal year when knitting
+if(params$catch_adjust_year == "2013"){test_catch_scenarios <- catch_scenarios_13}
+if(params$catch_adjust_year == "2014"){test_catch_scenarios <- catch_scenarios_14}
+if(params$catch_adjust_year == "2015"){test_catch_scenarios <- catch_scenarios_15}
+
 
 #Get Predictions for each catch scenario
 test_catch_predictions <- map(test_catch_scenarios, function(x) {
@@ -916,19 +1055,20 @@ test_catch_predictions <- test_catch_predictions %>% bind_rows(.id = "catch scen
   mutate(`catch scenario` = factor(`catch scenario`, levels = str_c(catch_scenarios, " * Observed Catch")),
          SEASON = factor(SEASON, levels = c("SPRING", "FALL")))
 
-```
 
-## Predicted Size Classes
 
-```{r}
+############################################################
+####    Plotting Code    ####
+############################################################
+
 
 #Plotting the different predicted size classes
 small_plot <- ggplot(test_catch_predictions, 
                      aes(as.factor(EST_YEAR), predicted_small, color = `catch scenario`)) +
   geom_boxplot() + 
   labs(x = NULL, y = "Predicted N-Small", 
-       title = str_c("Adjusted", params$catch_adjust_year, "Commercial Landings of 3+ Age Fish"),
-       subtitle = str_c("Impacts on predicted size classes \nRebalanced by sizeclass : ", params$rebalance)) +
+       title = str_c("Adjusted ", as.numeric(params$catch_adjust_year) - 1, " Commercial Landings of 3+ Age Fish"),
+       subtitle = str_c("Impacts on predicted size classes \nRebalanced by ", params$rebalance, "size-class")) +
   facet_wrap(~SEASON) + 
   theme(legend.position = "none")
 
@@ -942,7 +1082,7 @@ large_plot <- ggplot(test_catch_predictions,
                      aes(as.factor(EST_YEAR), predicted_large, color = `catch scenario`)) +
   geom_boxplot() + labs(x = NULL, y = "Predicted N-Large") +
   facet_wrap(~SEASON) +
-  guides(color = guide_legend(title = "2012 Catch Adjustment", title.hjust = 0.5, title.position = "top")) +
+  guides(color = guide_legend(title = str_c(as.numeric(params$catch_adjust_year) - 1, " Catch Adjustment"), title.hjust = 0.5, title.position = "top")) +
   theme(legend.position = "bottom")
 
 

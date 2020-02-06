@@ -15,7 +15,7 @@ params:
   user_name: "mbarajas"
   common_name: "atlantic cod"
   rebalance: "medium"
-  catch_adjust_year: "2014"
+  catch_adjust_year: "2013"
 ---
 
 # Setup
@@ -95,7 +95,7 @@ strata <- c(
   strata_key$`Gulf of Maine`)
 
 # filter Strata
-dat <-dat %>% filter(STRATUM%in%strata)
+dat <-dat %>% filter(STRATUM %in% strata)
 
 
 # Pull Target Species
@@ -105,7 +105,7 @@ codtow <- species_pull$codtow
 
 
 # one row for every unique ID
-dat <- dat %>% distinct(ID,.keep_all=TRUE)
+dat <- dat %>% distinct(ID, .keep_all = TRUE)
 ```
 
 ## 2. Set size classes
@@ -357,13 +357,18 @@ gbcatch <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/gb_catch_at_age_
 # age overlap is ages 1-9+
 # year overlap is years 1982-2014
 
+#Annual Landings Timeline
+plot(cbind(gomcatch$year, log10(rowSums(gomcatch))), xlab = "GOM", ylab = "landings (log10 transformed)")
+plot(cbind(gbcatch$year, log10(rowSums(gbcatch))), xlab = "GB", ylab = "landings (log10 transformed)")
+
 # remove + signs in column names
 colnames(gomcatch)[10] <- "age_9plus"
 colnames(gbcatch)[11] <- "age_10"
 
+
 # for GB, combine age 9 and 10+
-gbcatch <- gbcatch %>% mutate(age_9plus=age_9+age_10)
-gbcatch <- select(gbcatch, -c(age_9,age_10))
+gbcatch <- gbcatch %>% mutate(age_9plus = age_9 + age_10)
+gbcatch <- select(gbcatch, -c(age_9, age_10))
 
 # remove years prior to 1982 for GB
 gbcatch <- gbcatch %>% filter(year >= 1982)
@@ -377,8 +382,20 @@ colnames(gomcatch)[2:10] <- paste("c_r1_", colnames(gomcatch)[2:10], sep="")
 colnames(gbcatch)[2:10] <- paste("c_r2_", colnames(gbcatch)[2:10], sep="")
 catch <- left_join(gomcatch, gbcatch, by = "year")
 
+#Size Class Landings Timeline
+catch %>% 
+  pivot_longer(names_to = "age_class", values_to = "landings", cols = starts_with("c_r")) %>% 
+  mutate(
+    landings_log10 = log10(landings),
+    region = ifelse(str_detect(age_class, "r1"), "GOM", "GB"),
+    age_class = str_sub(age_class, 10, -1)
+  ) %>% 
+  ggplot(aes(year, landings_log10, color = age_class)) +
+    geom_line() +
+    facet_grid(. ~ region)
+
 # bump catch years up by year to pair with current year
-catch$year <- catch$year+1
+catch$year <- catch$year + 1
 ```
 
 ## 5. Regional SST 
@@ -518,15 +535,150 @@ sccolsval <- scale(sccolsval, center = col_means_trainval, scale = col_stddevs_t
 ### Manipulate un-standardized catch
 
 
-```{r}
+```{r multiplicative adjustment}
+
+# #Objective:
+# #Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
+# 
+# #Year can be accesses by looking at where the catch at age values break or by using alldata
+# year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
+# 
+# #Catch Scenarios
+# catch_scenarios <- c(0.25, 0.5, 1, 10, 50, 100, 150, 250, 500)
+# 
+# #Make lists containing test data for various scenarios
+# 
+# 
+# 
+# #2013 Adjustments
+# #test_catch_scenarios <- map(catch_scenarios, function(x){
+# catch_scenarios_13 <- map(catch_scenarios, function(x){
+#   
+#   #Adjust catches for target year
+#   adjusted_year <- test_data_df[year_labs == "2013",] %>% 
+#       mutate(
+#         #Region 1
+#          c_r1_age_3     =  c_r1_age_3 * x,
+#          c_r1_age_4     =  c_r1_age_4 * x,
+#          c_r1_age_5     =  c_r1_age_5 * x,
+#          c_r1_age_6     =  c_r1_age_6 * x,
+#          c_r1_age_7     =  c_r1_age_7 * x,
+#          c_r1_age_8     =  c_r1_age_8 * x,
+#          c_r1_age_9plus =  c_r1_age_9plus * x,
+#          #Region 2
+#          c_r2_age_3     =  c_r2_age_3 * x,
+#          c_r2_age_4     =  c_r2_age_4 * x,
+#          c_r2_age_5     =  c_r2_age_5 * x,
+#          c_r2_age_6     =  c_r2_age_6 * x,
+#          c_r2_age_7     =  c_r2_age_7 * x,
+#          c_r2_age_8     =  c_r2_age_8 * x,
+#          c_r2_age_9plus =  c_r2_age_9plus * x
+#         
+#       )
+#   
+#     #Same vals for 2014 and 15
+#     y2014 <- test_data_df[year_labs == "2014",] 
+#     y2015 <- test_data_df[year_labs == "2015",] 
+#     
+#     #Bind them together
+#     catch_out <- bind_rows(adjusted_year, y2014, y2015)
+#     return(catch_out)
+#   
+#   })
+# 
+# #2014
+# catch_scenarios_14 <- map(catch_scenarios, function(x){
+#   
+#   #Adjust catches for target year
+#   adjusted_year <- test_data_df[year_labs == "2014",] %>% 
+#       mutate(
+#         #Region 1
+#          c_r1_age_3     =  c_r1_age_3 * x,
+#          c_r1_age_4     =  c_r1_age_4 * x,
+#          c_r1_age_5     =  c_r1_age_5 * x,
+#          c_r1_age_6     =  c_r1_age_6 * x,
+#          c_r1_age_7     =  c_r1_age_7 * x,
+#          c_r1_age_8     =  c_r1_age_8 * x,
+#          c_r1_age_9plus =  c_r1_age_9plus * x,
+#          #Region 2
+#          c_r2_age_3     =  c_r2_age_3 * x,
+#          c_r2_age_4     =  c_r2_age_4 * x,
+#          c_r2_age_5     =  c_r2_age_5 * x,
+#          c_r2_age_6     =  c_r2_age_6 * x,
+#          c_r2_age_7     =  c_r2_age_7 * x,
+#          c_r2_age_8     =  c_r2_age_8 * x,
+#          c_r2_age_9plus =  c_r2_age_9plus * x
+#         
+#       )
+#   
+#     #Same vals for 2014 and 15
+#     y2013 <- test_data_df[year_labs == "2013",] 
+#     y2015 <- test_data_df[year_labs == "2015",] 
+#     
+#     #Bind them together
+#     catch_out <- bind_rows(y2013, adjusted_year, y2015)
+#     return(catch_out)
+#   
+#   })
+# 
+# #2015
+# catch_scenarios_15 <- map(catch_scenarios, function(x){
+#   
+#   #Adjust catches for target year
+#   adjusted_year <- test_data_df[year_labs == "2015",] %>% 
+#       mutate(
+#         #Region 1
+#          c_r1_age_3     =  c_r1_age_3 * x,
+#          c_r1_age_4     =  c_r1_age_4 * x,
+#          c_r1_age_5     =  c_r1_age_5 * x,
+#          c_r1_age_6     =  c_r1_age_6 * x,
+#          c_r1_age_7     =  c_r1_age_7 * x,
+#          c_r1_age_8     =  c_r1_age_8 * x,
+#          c_r1_age_9plus =  c_r1_age_9plus * x,
+#          #Region 2
+#          c_r2_age_3     =  c_r2_age_3 * x,
+#          c_r2_age_4     =  c_r2_age_4 * x,
+#          c_r2_age_5     =  c_r2_age_5 * x,
+#          c_r2_age_6     =  c_r2_age_6 * x,
+#          c_r2_age_7     =  c_r2_age_7 * x,
+#          c_r2_age_8     =  c_r2_age_8 * x,
+#          c_r2_age_9plus =  c_r2_age_9plus * x
+#         
+#       )    
+#       #Same vals for 2014 and 15
+#     y2013 <- test_data_df[year_labs == "2013",] 
+#     y2014 <- test_data_df[year_labs == "2014",] 
+#     
+#     #Bind them together
+#     catch_out <- bind_rows(y2013, y2014, adjusted_year)
+#     return(catch_out)
+#   })
+#   
+#   
+# 
+# 
+# #Name the list by the scenario being tested
+# catch_scenario_names <- str_c(catch_scenarios, " * Observed Catch")
+# names(catch_scenarios_13) <- str_c(catch_scenarios, " * Observed Catch")
+# names(catch_scenarios_14) <- str_c(catch_scenarios, " * Observed Catch")
+# names(catch_scenarios_15) <- str_c(catch_scenarios, " * Observed Catch")
+```
+
+
+```{r additive adjustment}
+
 #Objective:
 #Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
 
 #Year can be accesses by looking at where the catch at age values break or by using alldata
 year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
 
+#Range in Landings for each age class
+map(gomcatch, `[`) %>% map_dfr(range) 
+map(gbcatch, `[`) %>% map_dfr(range)
+
 #Catch Scenarios
-catch_scenarios <- c(0.25, 0.5, 1, 10, 50, 100, 150, 250, 500)
+catch_scenarios <- c(0, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8)
 
 #Make lists containing test data for various scenarios
 
@@ -540,21 +692,21 @@ catch_scenarios_13 <- map(catch_scenarios, function(x){
   adjusted_year <- test_data_df[year_labs == "2013",] %>% 
       mutate(
         #Region 1
-         c_r1_age_3     =  c_r1_age_3 * x,
-         c_r1_age_4     =  c_r1_age_4 * x,
-         c_r1_age_5     =  c_r1_age_5 * x,
-         c_r1_age_6     =  c_r1_age_6 * x,
-         c_r1_age_7     =  c_r1_age_7 * x,
-         c_r1_age_8     =  c_r1_age_8 * x,
-         c_r1_age_9plus =  c_r1_age_9plus * x,
+         c_r1_age_3     =  c_r1_age_3 + x,
+         c_r1_age_4     =  c_r1_age_4 + x,
+         c_r1_age_5     =  c_r1_age_5 + x,
+         c_r1_age_6     =  c_r1_age_6 + x,
+         c_r1_age_7     =  c_r1_age_7 + x,
+         c_r1_age_8     =  c_r1_age_8 + x,
+         c_r1_age_9plus =  c_r1_age_9plus + x,
          #Region 2
-         c_r2_age_3     =  c_r2_age_3 * x,
-         c_r2_age_4     =  c_r2_age_4 * x,
-         c_r2_age_5     =  c_r2_age_5 * x,
-         c_r2_age_6     =  c_r2_age_6 * x,
-         c_r2_age_7     =  c_r2_age_7 * x,
-         c_r2_age_8     =  c_r2_age_8 * x,
-         c_r2_age_9plus =  c_r2_age_9plus * x
+         c_r2_age_3     =  c_r2_age_3 + x,
+         c_r2_age_4     =  c_r2_age_4 + x,
+         c_r2_age_5     =  c_r2_age_5 + x,
+         c_r2_age_6     =  c_r2_age_6 + x,
+         c_r2_age_7     =  c_r2_age_7 + x,
+         c_r2_age_8     =  c_r2_age_8 + x,
+         c_r2_age_9plus =  c_r2_age_9plus + x
         
       )
   
@@ -575,21 +727,21 @@ catch_scenarios_14 <- map(catch_scenarios, function(x){
   adjusted_year <- test_data_df[year_labs == "2014",] %>% 
       mutate(
         #Region 1
-         c_r1_age_3     =  c_r1_age_3 * x,
-         c_r1_age_4     =  c_r1_age_4 * x,
-         c_r1_age_5     =  c_r1_age_5 * x,
-         c_r1_age_6     =  c_r1_age_6 * x,
-         c_r1_age_7     =  c_r1_age_7 * x,
-         c_r1_age_8     =  c_r1_age_8 * x,
-         c_r1_age_9plus =  c_r1_age_9plus * x,
+         c_r1_age_3     =  c_r1_age_3 + x,
+         c_r1_age_4     =  c_r1_age_4 + x,
+         c_r1_age_5     =  c_r1_age_5 + x,
+         c_r1_age_6     =  c_r1_age_6 + x,
+         c_r1_age_7     =  c_r1_age_7 + x,
+         c_r1_age_8     =  c_r1_age_8 + x,
+         c_r1_age_9plus =  c_r1_age_9plus + x,
          #Region 2
-         c_r2_age_3     =  c_r2_age_3 * x,
-         c_r2_age_4     =  c_r2_age_4 * x,
-         c_r2_age_5     =  c_r2_age_5 * x,
-         c_r2_age_6     =  c_r2_age_6 * x,
-         c_r2_age_7     =  c_r2_age_7 * x,
-         c_r2_age_8     =  c_r2_age_8 * x,
-         c_r2_age_9plus =  c_r2_age_9plus * x
+         c_r2_age_3     =  c_r2_age_3 + x,
+         c_r2_age_4     =  c_r2_age_4 + x,
+         c_r2_age_5     =  c_r2_age_5 + x,
+         c_r2_age_6     =  c_r2_age_6 + x,
+         c_r2_age_7     =  c_r2_age_7 + x,
+         c_r2_age_8     =  c_r2_age_8 + x,
+         c_r2_age_9plus =  c_r2_age_9plus + x
         
       )
   
@@ -610,21 +762,21 @@ catch_scenarios_15 <- map(catch_scenarios, function(x){
   adjusted_year <- test_data_df[year_labs == "2015",] %>% 
       mutate(
         #Region 1
-         c_r1_age_3     =  c_r1_age_3 * x,
-         c_r1_age_4     =  c_r1_age_4 * x,
-         c_r1_age_5     =  c_r1_age_5 * x,
-         c_r1_age_6     =  c_r1_age_6 * x,
-         c_r1_age_7     =  c_r1_age_7 * x,
-         c_r1_age_8     =  c_r1_age_8 * x,
-         c_r1_age_9plus =  c_r1_age_9plus * x,
+         c_r1_age_3     =  c_r1_age_3 + x,
+         c_r1_age_4     =  c_r1_age_4 + x,
+         c_r1_age_5     =  c_r1_age_5 + x,
+         c_r1_age_6     =  c_r1_age_6 + x,
+         c_r1_age_7     =  c_r1_age_7 + x,
+         c_r1_age_8     =  c_r1_age_8 + x,
+         c_r1_age_9plus =  c_r1_age_9plus + x,
          #Region 2
-         c_r2_age_3     =  c_r2_age_3 * x,
-         c_r2_age_4     =  c_r2_age_4 * x,
-         c_r2_age_5     =  c_r2_age_5 * x,
-         c_r2_age_6     =  c_r2_age_6 * x,
-         c_r2_age_7     =  c_r2_age_7 * x,
-         c_r2_age_8     =  c_r2_age_8 * x,
-         c_r2_age_9plus =  c_r2_age_9plus * x
+         c_r2_age_3     =  c_r2_age_3 + x,
+         c_r2_age_4     =  c_r2_age_4 + x,
+         c_r2_age_5     =  c_r2_age_5 + x,
+         c_r2_age_6     =  c_r2_age_6 + x,
+         c_r2_age_7     =  c_r2_age_7 + x,
+         c_r2_age_8     =  c_r2_age_8 + x,
+         c_r2_age_9plus =  c_r2_age_9plus + x
         
       )    
       #Same vals for 2014 and 15
@@ -640,11 +792,11 @@ catch_scenarios_15 <- map(catch_scenarios, function(x){
 
 
 #Name the list by the scenario being tested
-names(catch_scenarios_13) <- str_c(catch_scenarios, " * Observed Catch")
-names(catch_scenarios_14) <- str_c(catch_scenarios, " * Observed Catch")
-names(catch_scenarios_15) <- str_c(catch_scenarios, " * Observed Catch")
+catch_scenario_names <- str_c("Observed Catch + ", catch_scenarios )
+names(catch_scenarios_13) <- catch_scenario_names
+names(catch_scenarios_14) <- catch_scenario_names
+names(catch_scenarios_15) <- catch_scenario_names
 ```
-
 
 
 ### Re-assemble
@@ -806,72 +958,12 @@ val_data <- as.matrix(val_data)
 val_labels <- as.matrix(val_labels)
 
 # testing
-test_data_df <- test_data
 test_data <- as.matrix(test_data)
 test_labels <- as.matrix(test_labels)
 ```
 
 
-### TESTING: Manipulate Standardized Catch Data
-
-```{r, eval = FALSE}
-# 
-# # test_data   #Predictors
-# # test_labels #Observed Responses
-# 
-# #Objective:
-# #Adjust Catch of Adult Sized Fish 3+ in both regions for a specific year
-# 
-# #Year can be accesses by looking at where the catch at age values break or by using alldata
-# year_labs <- alldata %>% filter(EST_YEAR %in% test_years) %>% select(EST_YEAR)
-# 
-# #Catch Scenarios
-# catch_scenarios <- c(0.25, 0.5, 1 , 1.5, 2, 5, 10)
-# 
-# 
-# test_catch_scenarios <- map(catch_scenarios, function(x){
-#   
-#   #Adjust 2013 catches
-#   new_2013 <- test_data_df[year_labs == "2013",] %>% 
-#     mutate(
-#       #Region 1
-#        c_r1_age_3     =  c_r1_age_3 * x,
-#        c_r1_age_4     =  c_r1_age_4 * x,
-#        c_r1_age_5     =  c_r1_age_5 * x,
-#        c_r1_age_6     =  c_r1_age_6 * x,
-#        c_r1_age_7     =  c_r1_age_7 * x,
-#        c_r1_age_8     =  c_r1_age_8 * x,
-#        c_r1_age_9plus =  c_r1_age_9plus * x,
-#        #Region 2
-#        c_r2_age_3     =  c_r2_age_3 * x,
-#        c_r2_age_4     =  c_r2_age_4 * x,
-#        c_r2_age_5     =  c_r2_age_5 * x,
-#        c_r2_age_6     =  c_r2_age_6 * x,
-#        c_r2_age_7     =  c_r2_age_7 * x,
-#        c_r2_age_8     =  c_r2_age_8 * x,
-#        c_r2_age_9plus =  c_r2_age_9plus * x
-#       
-#     ) 
-#   
-#   
-#   #Same vals for 2014 and 15
-#   same_1415 <- test_data_df[year_labs != "2013",] 
-#   
-#   #Bind them together
-#   catch_out <- bind_rows(list("2013" = new_2013, "2014-15" = same_1415)) %>% 
-#     as.matrix()
-#   
-#   return(catch_out)
-#   
-#   
-# })
-# 
-# 
-# names(test_catch_scenarios) <- str_c(catch_scenarios, " * Observed Catch")
-```
-
-
-# Keras Model (s)
+# Keras Model(s)
 
 ###  Model Setup
 
@@ -900,7 +992,9 @@ predictions <- inputs %>%
 model <- keras_model(inputs = inputs, outputs = predictions)
 
 # compile
-model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
+model %>% compile(optimizer = "adam", 
+                  loss = "mse", 
+                  metrics = "mse")
   
 # summary
 model %>% summary()
@@ -909,11 +1003,37 @@ model %>% summary()
 ### Train Model
 
 ```{r}
+# Display training progress by printing a single dot for each completed epoch.
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 80 == 0) cat("\n")
+    cat(".")
+  }
+)    
+
+# Stop training if the validation score doesn't improve
+# The patience parameter is the amount of epochs to check for improvement.
+early_stop <- callback_early_stopping(monitor = "loss", patience = 25)
+
+
 # train model and store training progress learning curves (no validation)
-history <- model %>% fit(train_data, train_labels, epochs = 50, verbose = 1)
+history <- model %>% fit(
+  x = train_data,
+  y = train_labels, 
+  epochs = 200, 
+  verbose = 1, #Training plot
+  #callbacks = list(print_dot_callback)
+  callbacks = list(print_dot_callback, early_stop)
+  )
 
 # model performance on test set
 eval <- evaluate(model, test_data, test_labels, verbose = 0)
+
+# learning curves
+plot(history)
+
+# mean squared error
+eval
 ```
 
 ### Make Predictions
@@ -935,11 +1055,6 @@ results <- data.frame(
   predicted_medium = as.numeric(test_predictions[,2]),
   predicted_large  = as.numeric(test_predictions[,3]))
 
-# learning curves
-plot(history)
-
-# mean squared error
-eval
 
 # reshape prediction results for time series plots
 resdat <- results
@@ -1002,13 +1117,13 @@ datdat$observed_large <- datdat$nlarge
 
 ```{r fig.height = 8}
 
-# #Manual switching between years
-# params$catch_adjust_year <- "2013"
+#Manual switching between years
+params$catch_adjust_year <- "2013"
 
 #Parameter Toggle for focal year when knitting
-if(params$catch_adjust_year == "2013"){test_catch_scenarios <- catch_scenarios_13}
-if(params$catch_adjust_year == "2014"){test_catch_scenarios <- catch_scenarios_14}
-if(params$catch_adjust_year == "2015"){test_catch_scenarios <- catch_scenarios_15}
+if(params$catch_adjust_year == "2013") {test_catch_scenarios <- catch_scenarios_13}
+if(params$catch_adjust_year == "2014") {test_catch_scenarios <- catch_scenarios_14}
+if(params$catch_adjust_year == "2015") {test_catch_scenarios <- catch_scenarios_15}
 
 
 #Get Predictions for each catch scenario
@@ -1052,7 +1167,7 @@ test_catch_predictions <- map(test_catch_scenarios, function(x) {
 
 #Coalesce into a single dataframe for plotting
 test_catch_predictions <- test_catch_predictions %>% bind_rows(.id = "catch scenario") %>% 
-  mutate(`catch scenario` = factor(`catch scenario`, levels = str_c(catch_scenarios, " * Observed Catch")),
+  mutate(`catch scenario` = factor(`catch scenario`, levels = catch_scenario_names),
          SEASON = factor(SEASON, levels = c("SPRING", "FALL")))
 
 
@@ -1068,7 +1183,7 @@ small_plot <- ggplot(test_catch_predictions,
   geom_boxplot() + 
   labs(x = NULL, y = "Predicted N-Small", 
        title = str_c("Adjusted ", as.numeric(params$catch_adjust_year) - 1, " Commercial Landings of 3+ Age Fish"),
-       subtitle = str_c("Impacts on predicted size classes \nRebalanced by ", params$rebalance, "size-class")) +
+       subtitle = str_c("Impacts on predicted size classes \nRe-balanced by ", params$rebalance, " size class")) +
   facet_wrap(~SEASON) + 
   theme(legend.position = "none")
 

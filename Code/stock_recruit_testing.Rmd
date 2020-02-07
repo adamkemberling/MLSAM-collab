@@ -68,13 +68,13 @@ theme_set(theme_bw())
 load(str_c(mills_path, "Data/Survdat_Nye_allseason.RData"))
 
 # ID format
-survdat$ID <- format(survdat$ID,scientific=FALSE)
+survdat$ID <- format(survdat$ID, scientific = FALSE)
 
 # filter years
-dat <- survdat %>% filter(EST_YEAR%in%c(1982:2015))
+dat <- survdat %>% filter(EST_YEAR %in% c(1982:2015))
 
 # filter seasons
-dat <- dat %>% filter(SEASON%in%c("SPRING","FALL"))
+dat <- dat %>% filter(SEASON %in% c("SPRING","FALL"))
 
 # filter strata
 # offshore strata to include are (starts with 1 ends with 0, so offshore strata number 13 is 1130)
@@ -1303,9 +1303,9 @@ model_summs <- datdat %>%
          type = ifelse(type == "p", "predicted", "observed"))
 
 
-model_summs %>% 
-  split(.$area) %>% 
-  map(~ split(.x, .x$season))
+# model_summs %>% 
+#   split(.$area) %>% 
+#   map(~ split(.x, .x$season))
 
 # GoM SPRING
 model_summs %>%

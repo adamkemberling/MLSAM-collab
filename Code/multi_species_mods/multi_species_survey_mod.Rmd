@@ -2,7 +2,12 @@
 title: "General Groundfish Survey FFNN Size-Class Model"
 author: "Adam Kemberling"
 date: "`r Sys.Date()`"
-output: html_document
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+    code_folding: hide
 editor_options: 
   chunk_output_type: console
 params:
@@ -11,9 +16,14 @@ params:
   common_name: "atlantic cod"
   small_lim: 20
   medium_lim: 60
+  save_agg_catch: TRUE
+  save_mod: TRUE
+  save_maps: TRUE
+  save_vip: TRUE
 ---
 
-# Setup
+
+
 
 ```{r, warning = FALSE, message = FALSE}
 #Global knit options
@@ -35,8 +45,14 @@ library(recipes)
 library(rsample)
 library(knitr)
 library(suncalc)
+```
 
 
+
+# Setup - `r str_to_title(params$common_name)`
+
+
+```{r}
 #Set appropriate path to box and conda setup
 if(params$pc == TRUE) {
   # MB setup
@@ -65,6 +81,9 @@ source(here("code/data_reshaping_funs.R"))
 
 #GGplot theme
 theme_set(theme_bw())
+
+#Saving convention for plots
+mod_details <- str_replace(str_c(params$common_name, params$small_lim, params$medium_lim), " ", "_")
 ```
 
 # Load and Clean
@@ -107,6 +126,9 @@ dat <- dat %>% distinct(ID, .keep_all = TRUE)
 ```
 
 ## 2. Set Size classes
+
+Upper size limit for "small" size-class: `r params$small_lim`   
+Upper size limit for "medium" size-class: `r params$medium_lim`   
 
 ```{r}
 # bin lengths to 3 groups: small <20, medium 20-60, large >60
@@ -233,12 +255,22 @@ a <- p %>%
 
 ```{r}
 # plot abundance
-a %>%
+strat_abundance_timeline <- a %>%
   filter(type == "abundance")%>%
   ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
   geom_line(size = 1)+
   facet_grid(AREA + SEASON ~., scales="free") +
-  labs(title = "stratified mean abundance", x = "year", y = "mean abundance per tow across strata")
+  labs(title = str_c(params$common_name, " - stratified mean abundance"), 
+       x = "year", 
+       y = "mean abundance per tow across strata")
+
+strat_abundance_timeline
+
+if(params$save_agg_catch == TRUE) {
+  ggsave(strat_abundance_timeline, 
+         filename = here::here("Code", "multi_species_mods", "obs_abundance", str_c(mod_details, ".png")),
+         device = "png")
+}
 ```
 
 
@@ -416,7 +448,7 @@ model_recipe <-  recipe(
     #Temporal Information
     SEASON + SVVESSEL + tod + lunar_phase + 
     #Spatial Information
-    AREA + stratum + DECDEG_BEGLAT + DECDEG_BEGLON + 
+    AREA + stratum + #DECDEG_BEGLAT + DECDEG_BEGLON + 
     #Tow Information
     TOWDUR + BOTTEMP + SURFTEMP + AVGDEPTH + 
     #SST and SST ten days prior
@@ -441,10 +473,13 @@ summary(model_recipe) %>% knitr::kable()
 recipe_steps <- model_recipe %>% 
   #Mean impute numeric variables
   step_meanimpute(all_numeric(), -all_outcomes()) %>% 
+  
   #Convert Factor Variables into one-hot dummy variables
   step_dummy(all_nominal()) %>% 
+  
   #Re-scale numeric values to range 0-1
-  step_range(all_numeric(),  min = 0, max = 1,-all_outcomes())# %>% 
+  step_range(all_numeric(),  min = 0, max = 1,-all_outcomes()) # %>% 
+  
   #Remove variables that are unchanging 
   #step_nzv(all_predictors())
 
@@ -463,6 +498,7 @@ prepped_recipe
 ```{r}
 train_preprocessed <- bake(prepped_recipe, survey_training) 
 test_preprocessed <-  bake(prepped_recipe, survey_testing) 
+
 ```
 
 
@@ -505,7 +541,7 @@ test_data <- test_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.mat
 inputs <- layer_input(shape = dim(train_data)[2])
 
 # two hiddent layers with dropout
-hidden <- inputs%>%
+hidden <- inputs %>%
   layer_dense(units = dim(train_data)[2],
               activation = "relu",
               kernel_initializer = "he_normal",
@@ -588,7 +624,52 @@ cbind(eval) %>% kable()
 ```
 
 
-## 5. Make Predictions with Test Data
+
+# Save Model
+
+```{r, eval = params$save_mod}
+# Save ANN model
+save_model_hdf5(object = model, 
+                filepath = here("Code", "multi_species_mods", "keras_models", str_c(mod_details, ".h5")))
+
+
+####  training and Testing Data  ####
+write_csv(train_preprocessed, 
+          path = here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")), 
+          col_names = TRUE)
+
+write_csv(test_preprocessed,
+          path = here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")), 
+          col_names = TRUE)
+
+```
+
+
+
+# Load Model Run(s)
+
+
+```{r, eval = FALSE}
+# load saved model
+model <- load_model_hdf5(
+  filepath = here("Code", "multi_species_mods", "keras_models", str_c(mod_details, ".h5"))
+  )
+
+# load training
+training<-read_csv(here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")),
+                   col_types = cols(),
+                   guess_max = 1e5)
+
+# load testing
+testing<-read_csv(here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")),
+                   col_types = cols(),
+                   guess_max = 1e5)
+
+
+```
+
+
+# Make Predictions with Test Data
 
 ```{r}
 
@@ -632,136 +713,214 @@ datdat <- left_join(survey_meta, results, by = "ID")
 # datdat$observed_large <- datdat$nlarge
 ```
 
-## 1. Observed vs. Predicted train/test
+## 1. Testing Data - Obs/Pred Timeline {.tabset .tabset-pills}
 
 ```{r}
 #Factor Summaries
 model_summs <- datdat %>%
   group_by(year = EST_YEAR, area = AREA, season = SEASON) %>%
-  summarise(psmall = sum(predicted_small),
-            pmedium = sum(predicted_medium),
-            plarge = sum(predicted_large),
-            osmall = sum(observed_small),
-            omedium = sum(observed_medium),
-            olarge = sum(observed_large)) %>%
+  summarise(
+    psmall  = mean(predicted_small, na.rm = T),
+    pmedium = mean(predicted_medium, na.rm = T),
+    plarge  = mean(predicted_large, na.rm = T),
+    osmall  = mean(observed_small, na.rm = T),
+    omedium = mean(observed_medium, na.rm = T),
+    olarge  = mean(observed_large, na.rm = T)
+  ) %>%
   pivot_longer(cols=4:9,names_to=c("type","size"),values_to="abundance",names_sep=1) %>% 
   mutate(size = factor(size, levels = c("small", "medium", "large")),
-         type = ifelse(type == "p", "predicted", "observed"))
-
-
-
-# GoM 
-model_summs %>%
-  filter(area == "GoM") %>%
-  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
-  geom_line(size = 1) +
-  labs(title = "Gulf of Maine", x = NULL) +
-  facet_grid(size~ season, scales = "free") +
-  theme(legend.position = "bottom")
-
-
-# GB 
-model_summs %>%
-  filter(area == "GB") %>%
-  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
-  geom_line(size = 1) +
-  labs(title = "Georges Bank", x = NULL) +
-  facet_grid(size ~ season, scales = "free") +
-  theme(legend.position = "bottom")
-
-
+         type = ifelse(type == "p", "Predicted", "Observed"))
 
 ```
 
-## 2. Strata Predictions
+### Gulf of Maine
+
+```{r}
+
+# GoM 
+(GOM_test_tl <- model_summs %>%
+  filter(area == "GoM") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  scale_color_gmri(palette = "mixed") +
+  labs(title = str_c("Gulf of Maine - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
+  facet_grid(size~ season, scales = "free") +
+  theme(legend.position = c(0.1, 0.95), 
+        legend.background = element_blank(), 
+        legend.title = element_blank()))
+
+#Export Plot
+ggsave(GOM_test_tl, 
+         filename = here("Code", "multi_species_mods", "testdat_timelines", str_c(mod_details, "GOM.png")),
+         device = "png")
+```
+
+### Georges Bank
+
+```{r}
+
+# GB 
+(GB_test_tl <- model_summs %>%
+  filter(area == "GB") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = str_c("Georges Bank - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
+  scale_color_gmri(palette = "mixed") +
+  facet_grid(size ~ season, scales = "free") +
+  theme(legend.position = c(0.1, 0.95), 
+        legend.background = element_blank(), 
+        legend.title = element_blank()))
+
+
+
+
+
+#Export plot
+ggsave(GB_test_tl, 
+         filename = here("Code", "multi_species_mods", "testdat_timelines", str_c(mod_details, "GB.png")),
+         device = "png")
+
+```
+
+
+## 2. Aggregate Survey Abundances
+
+```{r}
+#Factor Summaries
+testing_abundances <- datdat %>%
+  group_by(area = AREA, season = SEASON) %>%
+  summarise(
+    psmall  = sum(predicted_small, na.rm = T),
+    pmedium = sum(predicted_medium, na.rm = T),
+    plarge  = sum(predicted_large, na.rm = T),
+    osmall  = sum(observed_small, na.rm = T),
+    omedium = sum(observed_medium, na.rm = T),
+    olarge  = sum(observed_large, na.rm = T)
+  ) %>%
+  pivot_longer(cols = psmall:olarge,
+               names_to = c("type", "size"),
+               values_to = "abundance", 
+               names_sep = 1) %>% 
+  mutate(size = factor(size, levels = c("small", "medium", "large")),
+         type = ifelse(type == "p", "Predicted", "Observed"))
+
+
+agg_catch_plot <- testing_abundances %>% 
+  ggplot(aes(size, abundance, fill = type)) +
+  geom_col(position = "dodge") +
+  facet_grid(season ~ area) +
+  labs(y = "Total Abundance - Testing Data", x = NULL) +
+  scale_fill_gmri(palette = "mixed") +
+  guides(fill = guide_legend("")) +
+  theme()
+
+
+agg_catch_plot
+
+#Export plot
+ggsave(agg_catch_plot, 
+         filename = here("Code", "multi_species_mods", "agg_catch", str_c(mod_details, ".png")),
+         device = "png")
+```
+
+
+
+
+## 3. Strata Predictions {.tabset}
 
 ```{r}
 ####  Load Model Prediction Data  ####
 # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
-
 mod_summs_sf <- strata_summs(datdat)
 ```
 
 
-## Observed and Predicted
+### Observed and Predicted {.tabset .tabset-pills}
 
 ```{r}
-obs_pred_plot(mod_summs_sf, size_facets = TRUE)
+stratum_plots <- obs_pred_plot(mod_summs_sf, size_facets = FALSE)
+
+
+# Save Plots
+if(params$save_maps == TRUE) {
+  ggsave(stratum_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(stratum_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(stratum_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "large.png")),
+         device = "png")
+}
+
 ```
 
-## Observed - Predicted
+#### Small
 
 ```{r}
-strata_diffs_plot(mod_summs_sf, size_facets = TRUE)
+stratum_plots$small
 ```
 
-# Save model
 
-```{r, eval = FALSE}
-# save ANN model
-save_model_hdf5(object = model, 
-                filepath = here("Code", "multi_species_mods", str_c(params$common_name, ".h5")))
+#### Medium
 
-# save predictions
-write_csv(datdat, 
-          here("Code", "multi_species_mods", str_c(params$common_name, "predictions.csv")), 
-          col_names = TRUE)
-
-# save training labels and features after features have been scaled
-write_csv(train_preprocessed, 
-          here("Code", "multi_species_mods", str_c(params$common_name, "training.csv")), 
-          col_names = TRUE)
-
-# save testing labels and features after features have been scaled
-write_csv(test_preprocessed, 
-          here("Code", "multi_species_mods", str_c(params$common_name, "testing.csv")), 
-          col_names = TRUE)
-
-# save testing labels and features before features have been scaled
-write_csv(survey_testing, 
-          here("Code", "multi_species_mods", str_c(params$common_name, "testing_notscaled.csv")), 
-          col_names = TRUE)
-
-# # save scaling means and stdevs
-# write_csv(bind_rows(col_means_trainval,col_stddevs_trainval),
-#           "feature_means_stdevs.csv")
+```{r}
+stratum_plots$medium
 ```
 
-# Load Model Runs
+#### Large
+
+```{r}
+stratum_plots$large
+```
+
+### Prediction Differences {.tabset .tabset-pills}
+
+```{r}
+strata_diff_plots <- strata_diffs_plot(mod_summs_sf, size_facets = FALSE)
 
 
-```{r, eval = FALSE}
-# load saved model
-model<-load_model_hdf5(filepath="model_runs/onemodel.h5")
+# Save Plots
+if(params$save_maps == TRUE) {
+  ggsave(strata_diff_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(strata_diff_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(strata_diff_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "large.png")),
+         device = "png")
+}
 
-# load predictions
-datdat <- read_csv("predictions20132015.csv",guess_max=7000)
+```
 
-# load training
-training<-read_csv("training.csv")
 
-# load testing
-testing<-read_csv("testing.csv")
+#### Small
 
-# load testing not scaled
-test_ind<-read_csv("testing_notscaled.csv")
+```{r}
+strata_diff_plots$small
+```
 
-# load scaling means and stdevs
-scaling<-read_csv("feature_means_stdevs.csv")
 
-# first row are means
-feat_mns<-scaling[1,]
+#### Medium
 
-# second row are stdevs
-feat_stdevs<-scaling[2,]
+```{r}
+strata_diff_plots$medium
+```
+
+#### Large
+
+```{r}
+strata_diff_plots$large
 ```
 
 
 
+## 4. Variable importance plots
 
-# Variable importance plots
-
-```{r, eval = FALSE}
+```{r}
 # from https://bgreenwell.github.io/pdp/articles/pdp-example-tensorflow.html
 
 # vip randomly permutes the values of each feature and records the drop in training performance
@@ -781,7 +940,7 @@ pred_wrapper <- function(object, newdata){
 size_classes <- c("small" = "nsmall", "medium" = "nmedium", "large" = "nlarge")
 
 
-
+#Map the plot function for each size class
 size_class_vip <- imap(size_classes, function(size_classes, label){
   p1 <- vip(
     object = model,                          # fitted model
@@ -791,150 +950,28 @@ size_class_vip <- imap(size_classes, function(size_classes, label){
     train = as.data.frame(train_data) ,      # training data
     target = train_labels[, size_classes],   # response values used for training (column 2 is medium size class)
     metric = "mse",                          # evaluation metric
-    progress = "text")                       # request a text-based progress bar
-  
-  
-  # #Save Size Class VIP Plot
-  # if(save = TRUE) {
-  #   ggsave(p1, 
-  #          filename = here("Code", "multi_species_mods", "vip_plots" params$common_name, label, "VIP.png"), 
-  #          device = "png")  
-  # }
+    progress = "none")                       # request a text-based progress bar
   
   
   # Return Plot
-  return(p1 + ggtitle(str_c("VIP for estimating ", label, " sized fish")))
+  return(p1 + labs(subtitle = str_c(params$common_name, " - ", label)))
 })
 
 
+vsmall <- size_class_vip$small  + labs(x = "")
+vmed   <- size_class_vip$medium  + labs(x  = NULL)
+vlarge <- size_class_vip$large
+
+vip_all <- vsmall / vmed / vlarge
+vip_all
+
+# Save Size Class VIP Plot
+if(params$save_vip == TRUE) {
+  ggsave(vip_all,
+         filename = here("Code", "multi_species_mods", "vip_plots", str_c(mod_details, "VIP.png")),
+         device = "png")
+  }
+
+
 ```
 
-# ICE curves (individual conditional expectation)
-
-```{r, eval = FALSE}
-# from https://christophm.github.io/interpretable-ml-book/ice.html
-
-# Individual Conditional Expectation (ICE) plots display one line per instance that shows how the instance's prediction changes when a feature changes
-
-# a partial dependence plot is an overall average of the ICE lines
-
-# use AVGDEPTH feature
-p2 <- partial(object=model,
-            pred.var="AVGDEPTH",
-            pred.fun=pred_wrapper,
-            train=as.data.frame(the_train_data))
-
-# use anom feature
-p3 <- partial(object=model,
-            pred.var="anom",
-            pred.fun=pred_wrapper,
-            train=as.data.frame(the_train_data))
-
-# use anom10 feature
-p4 <- partial(object=model,
-            pred.var="anom10",
-            pred.fun=pred_wrapper,
-            train=as.data.frame(the_train_data))
-
-# before unscale and back-transformation
-png(filename="ICE_curves.png",width=10,height=5,units="in",res=300)
-grid.arrange(p2%>%autoplot(alpha=0.1),
-             p3%>%autoplot(alpha=0.1),
-             p4%>%autoplot(alpha=0.1),
-             ncol=3)
-dev.off()
-
-# unscale
-p2$AVGDEPTH <- (p2$AVGDEPTH*feat_stdevs$AVGDEPTH)+feat_mns$AVGDEPTH
-
-# back transform predictions
-p2$yhat <- exp(p2$yhat)-1
-p3$yhat <- exp(p3$yhat)-1
-p4$yhat <- exp(p4$yhat)-1
-
-# after unscale and back-transformation
-png(filename="ICE_curves_unscale_backtransform.png",width=10,height=5,units="in",res=300)
-grid.arrange(p2%>%autoplot(alpha=0.2),
-             p3%>%autoplot(alpha=0.2),
-             p4%>%autoplot(alpha=0.2),
-             ncol=3)
-dev.off()
-```
-
-# partial dependence plot
-
-```{r, eval = FALSE}
-
-# partial dependence plot shows marginal effect one or two features have on the predicted outcome 
-
-# modify wrapper to return average prediction across all observations
-pred_wrapper <- function(object,newdata){
-  predict(object,x=as.matrix(newdata))[[2]]%>% # list 2 is medium size class
-  as.vector()%>%
-  mean()
-}
-
-# partial dependence plot
-p5 <- partial(object=model,
-            pred.var=c("AVGDEPTH","anom"),
-            chull=TRUE,                       # restrict predictions to region of joint values
-            pred.fun=pred_wrapper,
-            train=as.data.frame(the_train_data))
-
-# before unscale and back-transformation
-p5%>%autoplot()
-
-# unscale
-p5$AVGDEPTH <- (p5$AVGDEPTH*feat_stdevs$AVGDEPTH)+feat_mns$AVGDEPTH
-
-# back transform predictions
-p5$yhat <- exp(p5$yhat)-1
-
-# after unscale and back-transformation
-png(filename="PDP_depth_anom.png",width=6,height=5,units="in",res=300)
-p5%>%autoplot()
-dev.off()
-```
-
-# individual conditional expectation curve for catch
-
-```{r, eval = FALSE}
-
-# prediction function wrapper, two arguments: object (the fitted model) and newdata
-# The function needs to return a vector of predictions (one for each observation)
-pred_wrapper <- function(object,newdata){
-  predict(object,x=as.matrix(newdata))[[2]]%>% # list 2 is medium size class
-  as.vector()
-}
-
-# plot a couple of older age classes from both regions
-
-# 
-p6 <- partial(object=model,
-            pred.var="c_r2_age_5",
-            pred.fun=pred_wrapper,
-            train=as.data.frame(the_train_data))
-
-col_means_trainval
-col_stddevs_trainval[ind]
-
-# find column index to unscale
-ind<-which(names(col_means_trainval)=="c_r2_age_5")
-#ind<-which(colnames(feat_mns)=="c_r2_age_5")
-
-# unscale if it was scaled
-p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(col_stddevs_trainval[ind]))+as.numeric(col_means_trainval[ind])
-#p6$c_r2_age_5 <- (p6$c_r2_age_5*as.numeric(feat_stdevs[,ind]))+as.numeric(feat_mns[,ind])
-
-# back transform predictions
-p6$yhat <- exp(p6$yhat)-1
-
-# plot
-png(filename="ICE_curves_c_r2_age_5.png",width=3,height=5,units="in",res=300)
-p6%>%autoplot(alpha=0.2)
-dev.off()
-
-# find ids with top 5 highest prediction at lower range of catch
-top_ind<-unique(p6$yhat.id[which(p6$yhat>400)]) # 3608 5336 5599 5902 6391
-bind_cols(datdat[top_ind,1:9],training[top_ind,c(74,4,5)])
-```

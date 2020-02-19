@@ -397,6 +397,9 @@ alldata <- left_join(alldata, SST, by = c("EST_YEAR" = "year"))
 # complete cases only
 alldata <- alldata[complete.cases(alldata),]
 
+# save alldata 
+#write_csv(alldata,"alldata.csv")
+
 ```
 
 # Catch plots
@@ -814,6 +817,41 @@ colnames(test_data)
 colnames(test_data)[c(58,61,64,67)]
 test_data[,c(58,61,64,67)]<-test_data[,c(58,61,64,67)]*10
 
+# scenarios
+lrg_i1_1x<-test_data[,c(58,61,64,67)]*1
+lrg_i1_2x<-test_data[,c(58,61,64,67)]*2
+lrg_i1_5x<-test_data[,c(58,61,64,67)]*5
+lrg_i1_10x<-test_data[,c(58,61,64,67)]*10
+
+scenarioz<-bind_cols(test_ind[,c(3)],lrg_i1_1x,lrg_i1_2x,lrg_i1_5x,lrg_i1_10x)
+
+scenarioz<-distinct(scenarioz)
+
+colnames(scenarioz)<-c("EST_YEAR",
+ "gom_spr_abun_lrg_i1_1x",  "gom_fal_abun_lrg_i1_1x", "gb_spr_abun_lrg_i1_1x",  "gb_fal_abun_lrg_i1_1x",  
+ "gom_spr_abun_lrg_i1_2x",  "gom_fal_abun_lrg_i1_2x", "gb_spr_abun_lrg_i1_2x",  "gb_fal_abun_lrg_i1_2x",
+ "gom_spr_abun_lrg_i1_5x",  "gom_fal_abun_lrg_i1_5x", "gb_spr_abun_lrg_i1_5x",  "gb_fal_abun_lrg_i1_5x",
+ "gom_spr_abun_lrg_i1_10x", "gom_fal_abun_lrg_i1_10x","gb_spr_abun_lrg_i1_10x", "gb_fal_abun_lrg_i1_10x")
+
+png(filename="survey_abundance_scenarios.png",width=9,height=5,units="in",res=300)
+scenarioz%>%
+  pivot_longer(
+    cols=2:17,
+    names_to=c("area","season","type","size","year","scenario"),
+    names_pattern="(.*)_(.*)_(.*)_(.*)_(.*)_(.*)",
+    values_to="value"
+  )%>%
+  ggplot(aes(x=factor(scenario,levels=c("1x","2x","5x","10x")),y=value,color=area,shape=season))+
+  geom_point(size=3)+
+  labs(x = "prior year large abundance scenarios",y="weighted mean abundance per tow across strata last year")+
+  facet_grid(.~EST_YEAR)
+dev.off()
+```
+
+# scaling
+
+```{r}
+
 # Normalize features relative to training data
 # 1 is TOWDUR
 # 2 is AVGDEPTH
@@ -904,6 +942,8 @@ colnames(res)[10:21]<-c("small_1x","medium_1x","large_1x",
                         "small_5x","medium_5x","large_5x",
                         "small_10x","medium_10x","large_10x")
 
+# barplot by year
+png(filename="barplot_by_year.png",width=9,height=5,units="in",res=300)
 res%>%
   pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
   group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
@@ -913,10 +953,83 @@ res%>%
              fill = factor(size, levels = c("small","medium","large")))) +
   geom_bar(position = "dodge", stat = "identity")+
   labs(x = "prior year large abundance scenarios")+
-  scale_fill_discrete("size")
+  scale_fill_discrete("size")+
+  facet_grid(.~EST_YEAR)
+dev.off()
+
+# barplot by season
+png(filename="barplot_by_season.png",width=9,height=5,units="in",res=300)
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
+  summarise(abundance = sum(value)) %>%
+  ggplot(aes(x = factor(scenario, levels = c("1x", "2x", "5x", "10x")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "prior year large abundance scenarios")+
+  scale_fill_discrete("size")+
+  facet_grid(.~factor(SEASON,levels=c("SPRING","FALL")))
+dev.off()
+
+# barplot by year and season
+png(filename="barplot_by_year_season.png",width=9,height=5,units="in",res=300)
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
+  summarise(abundance = sum(value)) %>%
+  ggplot(aes(x = factor(scenario, levels = c("1x", "2x", "5x", "10x")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "prior year large abundance scenarios")+
+  scale_fill_discrete("size")+
+  facet_grid(.~EST_YEAR+factor(SEASON,levels=c("SPRING","FALL")))
+dev.off()
+
+# barplot by area
+png(filename="barplot_by_area.png",width=9,height=5,units="in",res=300)
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
+  summarise(abundance = sum(value)) %>%
+  ggplot(aes(x = factor(scenario, levels = c("1x", "2x", "5x", "10x")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "prior year large abundance scenarios")+
+  scale_fill_discrete("size")+
+  facet_grid(.~factor(AREA,levels=c("GoM","GB")))
+dev.off()
+
+# barplot by year and area
+png(filename="barplot_by_year_area.png",width=9,height=5,units="in",res=300)
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  group_by(AREA,EST_YEAR,SEASON,size,scenario) %>%
+  summarise(abundance = sum(value)) %>%
+  ggplot(aes(x = factor(scenario, levels = c("1x", "2x", "5x", "10x")), 
+             y = abundance, 
+             fill = factor(size, levels = c("small","medium","large")))) +
+  geom_bar(position = "dodge", stat = "identity")+
+  labs(x = "prior year large abundance scenarios")+
+  scale_fill_discrete("size")+
+  facet_grid(.~EST_YEAR+factor(AREA,levels=c("GoM","GB")))
+dev.off()
+
+# boxplot by year and size
+png(filename="boxplot_by_year_size.png",width=9,height=9,units="in",res=300)
+res%>%
+  pivot_longer(cols=10:21,names_to=c("size","scenario"),names_pattern="(.*)_(.*)",values_to="value")%>%
+  ggplot(aes(x=factor(scenario,levels = c("1x", "2x", "5x", "10x")),y=value,
+             color=factor(size,levels=c("small","medium","large"))))+
+  geom_boxplot()+
+  labs(x = "prior year large abundance scenarios",y="predicted abundance")+
+  scale_color_discrete("size")+
+  facet_wrap(.~EST_YEAR+factor(size,levels=c("small","medium","large")),scales="free_y")
+dev.off()
 
 ```
-
 
 # Strata Plots {.tabset .tabset-pills}
 
@@ -957,8 +1070,6 @@ obs_pred_plot(mod_summs_sf, size_facets = TRUE)
 ```{r}
 strata_diffs_plot(mod_summs_sf, size_facets = TRUE)
 ```
-
-
 
 # variable importance plot
 

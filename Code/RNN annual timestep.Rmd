@@ -207,18 +207,6 @@ p %>%
   ) -> a
 ```
 
-# stratified abundance
-
-```{r}
-# plot abundance
-a %>%
-  filter(type == "abundance")%>%
-  ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
-  geom_line(size = 1)+
-  facet_grid(AREA + SEASON ~., scales="free") +
-  labs(title = "stratified mean abundance", x = "year", y = "mean abundance per tow across strata")
-```
-
 # survey data
 
 ```{r}
@@ -342,20 +330,66 @@ rm(survey,catch,SST)
 dat<-alldata[,-c(32,45:57,70:81)]
 ```
 
+# timestep at season level
+
+```{r}
+
+# spring columns
+spr<-c(1,2:4,8:10,14:31,32:37,44:49)
+
+# fall columns
+fal<-c(1,5:7,11:13,14:31,38:43,50:55)
+
+# empty data frame
+seasondat<-data.frame(matrix(NaN,nrow=1,ncol=length(spr)))
+
+# column names
+colnames(seasondat)<-c("year","gom_sml","gom_med","gom_lrg","gb_sml","gb_med","gb_lrg",
+                       "c_r1_age_1","c_r1_age_2","c_r1_age_3","c_r1_age_4","c_r1_age_5","c_r1_age_6",
+                       "c_r1_age_7","c_r1_age_8","c_r1_age_9plus",
+                       "c_r2_age_1","c_r2_age_2","c_r2_age_3","c_r2_age_4","c_r2_age_5","c_r2_age_6",
+                       "c_r2_age_7","c_r2_age_8","c_r2_age_9plus",
+                       "m1_gom","m2_gom","m3_gom","m4_gom","m5_gom","m6_gom",
+                       "m1_gb","m2_gb","m3_gb","m4_gb","m5_gb","m6_gb")
+
+# stack seasons
+for(i in 1:nrow(dat)){seasondat<-rbind(seasondat,as.numeric(dat[i,spr]),as.numeric(dat[i,fal]))}
+
+# remove empty row
+seasondat<-seasondat[-1,]
+row.names(seasondat)<-NULL
+
+# one-hot spring fall
+#seasondat$isSpring<-rep(c(1,0),nrow(dat))
+#seasondat$isFall<-rep(c(0,1),nrow(dat))
+
+# timestep snapshots every june and december
+timestp<-cbind(paste(c(1982:2014),"-06-30",sep=""),paste(c(1982:2014),"-12-31",sep=""))
+x<-c()
+for(i in 1:33){
+  x<-c(x,timestp[i,1],timestp[i,2])
+}
+seasondat$Date<-as.Date(x)
+
+# reorder columns
+#seasondat<-seasondat[,c(40,2:7,38,39,8:37)]
+seasondat<-seasondat[,c(38,2:7,8:37)]
+```
+
 # moving block sub sampling
 
 ```{r}
 # data frame
-fish<-data.frame(dat)
+fish<-data.frame(seasondat)
 
 # model parameters
-max_len<-3 # look back 3 timesteps
+max_len<-6 # look back 6 timesteps
 
-# get vector of starting places, overlap by 3
+# get vector of starting places, overlap by 6
 start_indexes<-seq(1,nrow(fish)-(max_len),by=1)
 
-# training rows
-training_index<-1:24
+# training rows, pick even number to end on a fall timestep
+training_index<-1:52
 
 # scale all data with stats from only the training data
 mean<-apply(fish[training_index,-1],2,mean)
@@ -380,7 +414,7 @@ for(j in 1:(ncol(fish)-1)){
 X<-fish_cube[,-ncol(fish_cube),]
 
 # select label
-label<-1:3
+label<-1:6
 LABELS<-fish_cube[,ncol(fish_cube),label]
 
 # training
@@ -400,23 +434,56 @@ inputs <- layer_input(shape = dim(features_train)[2:3])
 
 # hidden layers, long short term memory
 hidden<- inputs %>% 
-  layer_lstm(units=3,return_sequences=TRUE)%>%
-  layer_lstm(units=3,activation="relu")
+  layer_lstm(units=dim(features_train)[3],dropout=0.1,recurrent_dropout=0.5,
+             kernel_initializer="he_normal",bias_initializer="he_uniform",return_sequences=TRUE)%>%
+  layer_lstm(units=dim(features_train)[3],dropout=0.1,recurrent_dropout=0.5,
+             kernel_initializer="he_normal",bias_initializer="he_uniform",activation="relu")
 
-# output layer
-outputs<- hidden %>% layer_dense(units=length(label))
+# output for small size class
+gom_sml_out <- hidden %>% layer_dense(units=1,name="gom_sml")
 
-# model
-model <- keras_model(inputs = inputs, outputs = outputs)
+# output for medium size class
+gom_med_out <- hidden %>% layer_dense(units=1,name="gom_med")
+
+# output for large size class
+gom_lrg_out <- hidden %>% layer_dense(units=1,name="gom_lrg")
+
+# output for small size class
+gb_sml_out <- hidden %>% layer_dense(units=1,name="gb_sml")
+
+# output for medium size class
+gb_med_out <- hidden %>% layer_dense(units=1,name="gb_med")
+
+# output for large size class
+gb_lrg_out <- hidden %>% layer_dense(units=1,name="gb_lrg")
+
+# create model
+model <- keras_model(inputs = inputs, outputs = c(gom_sml_out,
+                                                  gom_med_out,
+                                                  gom_lrg_out,
+                                                  gb_sml_out,
+                                                  gb_med_out,
+                                                  gb_lrg_out))
+
+# compile
+model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse",loss_weights = list(gom_sml=1,
+                                                                                        gom_med=1,
+                                                                                        gom_lrg=1,
+                                                                                        gb_sml=1,
+                                                                                        gb_med=1,
+                                                                                        gb_lrg=1))
 
 # summary
 summary(model)
 
-# compile
-model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse")
-
 # train
-learningcurves <- model %>% fit(x = features_train,  y = labels_train, batch_size = 1, epochs = 100, verbose = 0)
+learningcurves <- model %>% fit(x = features_train,  y=list(gom_sml=labels_train[,1],
+                                                            gom_med=labels_train[,2],
+                                                            gom_lrg=labels_train[,3],
+                                                            gb_sml=labels_train[,4],
+                                                            gb_med=labels_train[,5],
+                                                            gb_lrg=labels_train[,6]),
+                                batch_size = 1, epochs = 100, verbose = 1)
 
 # plot learning curves
 plot(learningcurves)
@@ -426,34 +493,41 @@ plot(learningcurves)
 
 ```{r}
 # model performance on test set
-evaluate(model,features_test,labels_test,verbose=0)
+evaluate(model,features_test,y=list(gom_sml=labels_test[,1],
+                                    gom_med=labels_test[,2],
+                                    gom_lrg=labels_test[,3],
+                                    gb_sml=labels_test[,4],
+                                    gb_med=labels_test[,5],
+                                    gb_lrg=labels_test[,6]),verbose=0)
 
 # make predictions
 preds<-model%>%predict(features_test)
+preds<-cbind(preds[[1]],preds[[2]],preds[[3]],preds[[4]],preds[[5]],preds[[6]])
 
 # unscale
 preds<-t((t(preds)*std[label])+mean[label])
-y<-t((t(fish[,2:4])*std[label])+mean[label])
+y<-t((t(fish[,(label+1)])*std[label])+mean[label])
 
 # observed
-res<-data.frame(year=fish$year,y)
-colnames(res)<-c("year",paste(names(mean[label]),"obs",sep="_"))
+res<-data.frame(year=fish$Date,y)
+colnames(res)<-c("Date",paste(names(mean[label]),"obs",sep="_"))
 
 # predicted
-preds<-data.frame(year=fish$year[28:33],preds)
-colnames(preds)<-c("year",paste(names(mean[label]),"pred",sep="_"))
+predrows<-((nrow(fish)-dim(features_test)[1])+1):nrow(fish)
+preds<-data.frame(year=fish$Date[predrows],preds)
+colnames(preds)<-c("Date",paste(names(mean[label]),"pred",sep="_"))
 
 # combine together
-res<-left_join(res,preds,"year")
+res<-left_join(res,preds,"Date")
 
 # long format
-res<-res%>%pivot_longer(cols=2:7,names_to=c("area","season","abun","size","type"),
-                        names_pattern="(.*)_(.*)_(.*)_(.*)_(.*)",
+res<-res%>%pivot_longer(cols=2:13,names_to=c("area","size","type"),
+                        names_pattern="(.*)_(.*)_(.*)",
                         values_to="value")
 
 # plot
 res%>%
-  ggplot(aes(x=year,y=value,color=type))+
+  ggplot(aes(x=Date,y=value,color=type))+
   geom_line(size=1)+
-  facet_grid(factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
+  facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
 ```

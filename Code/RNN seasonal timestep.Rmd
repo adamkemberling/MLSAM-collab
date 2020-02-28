@@ -1,5 +1,5 @@
 ---
-title: "RNN: lookback 3 years, predict 1 year ahead"
+title: "RNN: lookback 6 seasons, predict 1 season ahead"
 author: "MFBarajas"
 date: "`r Sys.Date()`"
 output: html_document
@@ -39,206 +39,17 @@ source(here("code/data_reshaping_funs.R"))
 theme_set(theme_bw())
 ```
 
-# filter and preprocess data
+# survey model output as input for seasonal model
 
 ```{r}
-# NEFSC bottom trawl
-load(str_c(mills_path, "Data/Survdat_Nye_allseason.RData"))
 
-# ID format
-survdat$ID <- format(survdat$ID,scientific=FALSE)
+# time series of abundance as catch/standard tow
+# output of survey model grouped on year, area, season
+# calculated average observed and predicted of each size class
+survey<-read_csv(str_c(mills_path,"Projects/NSF_CAccel/Data/atlantic_cod2060.csv"),col_types=cols())
 
-# filter years
-dat <- survdat %>% filter(EST_YEAR%in%c(1982:2015))
-
-# filter seasons
-dat <- dat %>% filter(SEASON%in%c("SPRING","FALL"))
-
-# filter strata
-# offshore strata to include are (starts with 1 ends with 0, so offshore strata number 13 is 1130)
-# inshore strata to include are (starts with 3 ends with 0, so inshore strata 61 is 3610)
-# strata <- c(1130,1140,1150,1160,1170,1180,1190,1200,1210,1220,1230,1240,1250,1260,1270,1280,
-#           1290,1300,1360,1370,1380,1390,1400,3560,3580,3590,3600,3610,3630,3640,3650,3660)
-
-# Stratum Key for filtering specific areas
-strata_key <- list(
-  "Georges Bank"  = c(1130,1140, 1150, 1160, 1170, 1180, 1190, 
-                      1200, 1210, 1220, 1230, 1240, 1250, 3560),
-  "Gulf of Maine" = c(1260, 1270, 1280, 1290, 1300, 1360, 1370, 1380, 
-                      1390, 1400, 3580, 3590, 3600, 3610, 3630, 3640, 3650, 3660))
-
-# the strata we want
-strata <- c(
-  strata_key$`Georges Bank`, 
-  strata_key$`Gulf of Maine`)
-
-# filter Strata
-dat <-dat %>% filter(STRATUM%in%strata)
-
-
-# Pull Target Species
-species_pull <- species_selection(survey_data = dat, common_name = params$common_name)
-cod <- species_pull$cod
-codtow <- species_pull$codtow
-
-# one row for every unique ID
-dat <- dat %>% distinct(ID,.keep_all=TRUE)
-```
-
-# three size classes
-
-```{r}
-# bin lengths to 3 groups: small <20, medium 20-60, large >60
-cod$SIZE <- ifelse(cod$LENGTH < 20, "small", ifelse(cod$LENGTH > 60,"large","medium"))
-cod$NUM <- 1
-
-# for each ID, count number of small, medium, and large
-x <- cod %>% pivot_wider(id_cols = ID, names_from = SIZE, values_from = NUM, values_fn = list(NUM = sum))
-
-# join with codtow
-codtow <- left_join(codtow, x, by="ID")
-
-# remove LENGTH, NUMLEN
-codtow <- select(codtow, -c(LENGTH, NUMLEN))
-
-# join tows with cod with tows without cod
-x <- left_join(dat, codtow, by="ID")
-
-# select columns to keep
-x <- select(x, c(1:29,35:43,74,75,76,77,78,88,89,90))
-
-# if COMNAME is NA, fill-in biomass, abundance, small, medium, large with 0
-notcod <- which(is.na(x$COMNAME.y))
-x$BIOMASS.y[notcod] <- 0
-x$ABUNDANCE.y[notcod] <- 0
-x$small[notcod] <- 0
-x$medium[notcod] <- 0
-x$large[notcod] <- 0
-
-# for tows with cod, fill-in size category abundance NA with 0
-x$small[is.na(x$small)] <- 0
-x$medium[is.na(x$medium)] <- 0
-x$large[is.na(x$large)] <- 0
-
-# proportion of relative abundance/biomass allocated to each size class
-
-#Replace Loop
-x <- x %>% 
-  mutate(
-    nsmall   = ABUNDANCE.y * small / (small + medium + large),
-    nmedium  = ABUNDANCE.y * medium / (small + medium + large),
-    nlarge   = ABUNDANCE.y * large / (small + medium + large),
-    nsmall   = ifelse(is.na(nsmall) == T, 0, nsmall),
-    nmedium  = ifelse(is.na(nmedium) == T, 0, nmedium),
-    nlarge   = ifelse(is.na(nlarge) == T, 0, nlarge),
-    bsmall   = BIOMASS.y * small / (small + medium + large),
-    bmedium  = BIOMASS.y * medium / (small + medium + large),
-    blarge   = BIOMASS.y * large / (small + medium + large),
-    bsmall   = ifelse(is.na(bsmall) == T, 0, bsmall),
-    bmedium  = ifelse(is.na(bmedium) == T, 0, bmedium),
-    blarge   = ifelse(is.na(blarge) == T, 0, blarge)
-  )
-
-```
-
-# area of strata
-
-```{r,message=FALSE}
-# bring in strata area
-strataarea <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/strata area.csv"), 
-                       col_types = cols())
-
-strataarea <- select(strataarea, area, stratum)
-colnames(x)[25] <- "stratum"
-x <- left_join(x, strataarea, by="stratum")
-
-# column names without .x or .y at the end
-colnames(x) <- str_split(string = colnames(x), pattern="[.]", simplify=TRUE)[,1]
-
-# Assign strata to area
-# Georges Bank: 1130 1140 1150 1160 1170 1180 1190 1200 1210 1220 1230 1240 1250 3560
-# Gulf of Maine: 1260 1270 1280 1290 1300 1360 1370 1380 1390 1400 3580 3590 3600 3610 3630 3640 3650 3660
-# GBstrata <- c(1130,1140,1150,1160,1170,1180,1190,1200,1210,1220,1230,1240,1250,3560)
-
-# specify prior area columns (statistical area and stratum size area)
-colnames(x)[c(30,53)] <- c("STATAREA","STRATUMAREA")
-
-x$AREA <- ifelse(x$stratum %in% strata_key$`Georges Bank`, "GB", "GoM")
-
-# calculate annual area/season/size class mean abundance and biomass within strata
-# area: GoM, GB
-# season: spring, fall
-# size class: small, medium, large
-x %>%
-  group_by(EST_YEAR,AREA,SEASON,stratum) %>%
-  summarise(mnsmall     = mean(nsmall), 
-            mnmedium    = mean(nmedium),
-            mnlarge     = mean(nlarge),
-            mnbsmall    = mean(bsmall),
-            mnbmedium   = mean(bmedium),
-            mnblarge    = mean(blarge),
-            STRATUMAREA = mean(STRATUMAREA)
-            ) -> q
-
-# calculate stratum weights by stratum area
-q %>%
-  group_by(EST_YEAR, AREA, SEASON) %>%
-  mutate(weight = STRATUMAREA / (sum(STRATUMAREA))
-         ) -> q
-
-# calculate annual area/season/size class mean abundance and biomass across strata
-q %>%
-  group_by(EST_YEAR, AREA, SEASON) %>%
-  summarise(abundance_small  = weighted.mean(mnsmall, weight),
-            abundance_medium = weighted.mean(mnmedium, weight),
-            abundance_large  = weighted.mean(mnlarge, weight),
-            biomass_small    = weighted.mean(mnbsmall, weight),
-            biomass_medium   = weighted.mean(mnbmedium, weight),
-            biomass_large    = weighted.mean(mnblarge, weight)
-            ) -> p
-
-# long format for plots
-p %>%
-  pivot_longer(
-    cols = 4:9,
-    names_to = c("type", "size"),
-    names_patter = "(.*)_(.*)",
-    values_to = "value"
-  ) -> a
-```
-
-# survey data
-
-```{r}
-# data frame to store stratified survey year i
-# column 1 is year
-# other columns will be ordered by area (GoM, GB), season (spring, fall), type (abundance, biomass), size classes s/m/l
-# 1 + (2 x 2 x 2 x 3) = 25
-survdf<-data.frame(matrix(NA,nrow=34,ncol=25))
-colnames(survdf)<-c("year","gom_spr_abun_sml","gom_spr_abun_med","gom_spr_abun_lrg",
-                           "gom_spr_bio_sml","gom_spr_bio_med","gom_spr_bio_lrg",
-                           "gom_fal_abun_sml","gom_fal_abun_med","gom_fal_abun_lrg",
-                           "gom_fal_bio_sml","gom_fal_bio_med","gom_fal_bio_lrg",
-                           "gb_spr_abun_sml","gb_spr_abun_med","gb_spr_abun_lrg",
-                           "gb_spr_bio_sml","gb_spr_bio_med","gb_spr_bio_lrg",
-                           "gb_fal_abun_sml","gb_fal_abun_med","gb_fal_abun_lrg",
-                           "gb_fal_bio_sml","gb_fal_bio_med","gb_fal_bio_lrg")
-
-# add year
-survdf[,1]<-sort(unique(p$EST_YEAR))
-
-# order of rows from p are 4:1 when subset by year
-pdf<-as.data.frame(p)
-for(i in 1:34){
-  survdf[i,2:25]<-as.numeric(unlist(c(subset(pdf,pdf$EST_YEAR==survdf$year[i])[4,4:9],
-                                      subset(pdf,pdf$EST_YEAR==survdf$year[i])[3,4:9],
-                                      subset(pdf,pdf$EST_YEAR==survdf$year[i])[2,4:9],
-                                      subset(pdf,pdf$EST_YEAR==survdf$year[i])[1,4:9])))
-}
-
-# reorder columns all abundance together all biomass together
-survdf<-survdf[,c(str_which(colnames(survdf),pattern="bio",negate=TRUE),
-                  str_which(colnames(survdf),pattern="bio",negate=FALSE))]
+# reshape to wide format
+survey<-survey%>%pivot_wider(names_from=c(area,season,size,type),values_from=abundance,values_fill=list(abundance=0))
 ```
 
 # catch data
@@ -306,7 +117,7 @@ SST<-left_join(SST_GoM,SST_GB,by="year")
 ```{r,message=FALSE}
 
 # annual stratified mean survey abundance by area/season/size 1982:2015
-survey<-survdf[,1:13]
+#survey<-survey[,1:13]
 
 # annual catch age-1 to age-9+ by area 1982:2014
 #catch
@@ -316,18 +127,13 @@ survey<-survdf[,1:13]
 # monthly average temperature by region 1982:2019
 SST<-SST[-1,]
 
-# remove some objects
-rm(a,cod,codtow,dat,gbcatch,gomcatch,p,pdf,q,SST_GB,SST_GoM,species_pull,strata_key,
-   strataarea,survdat,survdf,x,i,notcod,strata)
-
 # combine
 alldata<-inner_join(survey,catch,by="year")
 alldata<-inner_join(alldata,SST,by="year")
 
-rm(survey,catch,SST)
-
 # don't include SST anomaly
-dat<-alldata[,-c(32,45:57,70:81)]
+dat<-alldata[,-c(44,57:69,82:93)]
+
 ```
 
 # timestep at season level
@@ -335,16 +141,18 @@ dat<-alldata[,-c(32,45:57,70:81)]
 ```{r}
 
 # spring columns
-spr<-c(1,2:4,8:10,14:31,32:37,44:49)
+spr<-c(1,2:7,14:19,26:43,44:49,56:61)
 
 # fall columns
-fal<-c(1,5:7,11:13,14:31,38:43,50:55)
+fal<-c(1,8:13,20:25,26:43,50:55,62:67)
 
 # empty data frame
 seasondat<-data.frame(matrix(NaN,nrow=1,ncol=length(spr)))
 
 # column names
-colnames(seasondat)<-c("year","gom_sml","gom_med","gom_lrg","gb_sml","gb_med","gb_lrg",
+colnames(seasondat)<-c("year",
+                       "gb_sml_pr","gb_med_pr","gb_lrg_pr","gb_sml_ob","gb_med_ob","gb_lrg_ob",
+                       "gom_sml_pr","gom_med_pr","gom_lrg_pr","gom_sml_ob","gom_med_ob","gom_lrg_ob",
                        "c_r1_age_1","c_r1_age_2","c_r1_age_3","c_r1_age_4","c_r1_age_5","c_r1_age_6",
                        "c_r1_age_7","c_r1_age_8","c_r1_age_9plus",
                        "c_r2_age_1","c_r2_age_2","c_r2_age_3","c_r2_age_4","c_r2_age_5","c_r2_age_6",
@@ -359,10 +167,6 @@ for(i in 1:nrow(dat)){seasondat<-rbind(seasondat,as.numeric(dat[i,spr]),as.numer
 seasondat<-seasondat[-1,]
 row.names(seasondat)<-NULL
 
-# one-hot spring fall
-#seasondat$isSpring<-rep(c(1,0),nrow(dat))
-#seasondat$isFall<-rep(c(0,1),nrow(dat))
-
 # timestep snapshots every june and december
 timestp<-cbind(paste(c(1982:2014),"-06-30",sep=""),paste(c(1982:2014),"-12-31",sep=""))
 x<-c()
@@ -372,8 +176,26 @@ for(i in 1:33){
 seasondat$Date<-as.Date(x)
 
 # reorder columns
-#seasondat<-seasondat[,c(40,2:7,38,39,8:37)]
-seasondat<-seasondat[,c(38,2:7,8:37)]
+seasondat<-seasondat[,c(44,11:13,5:7,8:10,2:4,14:43)]
+
+# 6-month average temperature for both regions
+seasondat<-seasondat%>%mutate(past6_mon_ave_gom=(m1_gom+m2_gom+m3_gom+m4_gom+m5_gom+m6_gom)/6)
+seasondat<-seasondat%>%mutate(past6_mon_ave_gb=(m1_gb+m2_gb+m3_gb+m4_gb+m5_gb+m6_gb)/6)
+
+# remove months
+seasondat<-seasondat[,-c(32:43)]
+
+# plot
+seasondat%>%
+  pivot_longer(cols=2:7,
+               names_to=c("area","size","type"),
+               names_pattern="(.*)_(.*)_(.*)",
+               values_to="value")%>%
+  ggplot(aes(x=Date,y=value))+
+  geom_line(size=1)+
+  labs(y="catch / standard tow")+
+  facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
+
 ```
 
 # moving block sub sampling
@@ -521,13 +343,13 @@ colnames(preds)<-c("Date",paste(names(mean[label]),"pred",sep="_"))
 res<-left_join(res,preds,"Date")
 
 # long format
-res<-res%>%pivot_longer(cols=2:13,names_to=c("area","size","type"),
-                        names_pattern="(.*)_(.*)_(.*)",
+res<-res%>%pivot_longer(cols=2:13,names_to=c("area","size","type1","type2"),
+                        names_pattern="(.*)_(.*)_(.*)_(.*)",
                         values_to="value")
 
 # plot
 res%>%
-  ggplot(aes(x=Date,y=value,color=type))+
+  ggplot(aes(x=Date,y=value,color=type2))+
   geom_line(size=1)+
   facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
 ```

@@ -1,0 +1,1016 @@
+---
+title: "General Groundfish Survey FFNN Size-Class Model"
+author: "Adam Kemberling"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+params:
+  pc: FALSE
+  user_name: "mbarajas"
+  common_name: "atlantic cod"
+  small_lim: 20
+  medium_lim: 60
+  save_agg_catch: FALSE
+  save_mod: FALSE
+  save_maps: FALSE
+  save_vip: FALSE
+---
+
+
+
+
+```{r, warning = FALSE, message = FALSE}
+#Global knit options
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# Libraries
+library(lubridate)
+library(tidyverse)
+library(here)
+library(keras)
+library(caret)
+library(UBL)
+library(sf)
+library(gmRi)
+library(vip)
+library(pdp)
+library(patchwork)
+library(recipes)
+library(rsample)
+library(knitr)
+library(suncalc)
+```
+
+
+
+# Setup - `r str_to_title(params$common_name)`
+
+
+```{r}
+#Set appropriate path to box and conda setup
+if(params$pc == TRUE) {
+  # MB setup
+
+  user.name <- params$user_name
+
+  mills_path <- shared.path(os.use = "windows", group = "Mills Lab", folder = NULL)
+  res_path <- shared.path(os.use = "windows", group = "RES Data", folder = NULL)
+  
+} else {
+  
+  #File Paths
+  mills_path <- shared.path(os.use = "unix", group = "Mills Lab", folder = NULL)
+  res_path <- shared.path(os.use = "unix", group = "RES Data", folder = NULL)
+  
+  #Conda setup
+  reticulate::use_condaenv("rkeras2020")
+}
+
+
+
+#Helper functions
+source(here("code", "model_diagnostic_funs.R"))
+source(here("code/data_cleanup_funs.R"))
+source(here("code/data_reshaping_funs.R"))
+
+#GGplot theme
+theme_set(theme_bw())
+
+#Saving convention for plots
+mod_details <- str_replace(str_c(params$common_name, params$small_lim, params$medium_lim), " ", "_")
+```
+
+# Load and Clean
+
+## 1. Filter and Pre-Process
+
+```{r}
+# NEFSC bottom trawl
+load(str_c(mills_path, "Data/Survdat_Nye_allseason.RData"))
+
+
+# Stratum Key for filtering specific areas
+strata_key <- list(
+  "Georges Bank"  = c(1130,1140, 1150, 1160, 1170, 1180, 1190, 
+                      1200, 1210, 1220, 1230, 1240, 1250, 3560),
+  "Gulf of Maine" = c(1260, 1270, 1280, 1290, 1300, 1360, 1370, 1380, 
+                      1390, 1400, 3580, 3590, 3600, 3610, 3630, 3640, 3650, 3660))
+
+# Pull the strata we want
+strata <- c(
+  strata_key$`Georges Bank`, 
+  strata_key$`Gulf of Maine`)
+
+#Filtering
+dat <- survdat %>% 
+  mutate(ID = format(ID, scientific = FALSE)) %>% 
+  filter(EST_YEAR %in% c(1982:2015),
+         SEASON   %in% c("SPRING", "FALL"),
+         STRATUM  %in% strata)
+
+
+# Pull Target Species
+species_pull <- species_selection(survey_data = dat, common_name = params$common_name)
+cod          <- species_pull$cod
+codtow       <- species_pull$codtow
+
+
+# one row for every unique ID
+dat <- dat %>% distinct(ID, .keep_all = TRUE)
+```
+
+## 2. Set Size classes
+
+Upper size limit for "small" size-class: `r params$small_lim`   
+Upper size limit for "medium" size-class: `r params$medium_lim`   
+
+```{r}
+# bin lengths to 3 groups: small <20, medium 20-60, large >60
+cod <- cod %>% 
+  mutate(
+    SIZE = ifelse(LENGTH < params$small_lim, "small", "medium"),
+    SIZE = ifelse(LENGTH > params$medium_lim,"large", SIZE),
+    NUM  = 1
+  )
+
+
+# for each ID, count number of small, medium, and large
+x <- cod %>% pivot_wider(id_cols = ID, names_from = SIZE, values_from = NUM, values_fn = list(NUM = sum))
+
+# join with codtow
+codtow <- left_join(codtow, x, by="ID")
+
+# remove LENGTH, NUMLEN
+codtow <- select(codtow, -c(LENGTH, NUMLEN))
+
+# join tows with cod with tows without cod
+x <- left_join(dat, codtow, by="ID")
+
+# select columns to keep
+x <- select(x, c(1:29,35:43,74,75,76,77,78,88,89,90))
+
+# if COMNAME is NA, fill-in biomass, abundance, small, medium, large with 0
+notcod <- which(is.na(x$COMNAME.y))
+x$BIOMASS.y[notcod]   <- 0
+x$ABUNDANCE.y[notcod] <- 0
+x$small[notcod]       <- 0
+x$medium[notcod]      <- 0
+x$large[notcod]       <- 0
+
+# for tows with cod, fill-in size category abundance NA with 0
+x$small[is.na(x$small)]   <- 0
+x$medium[is.na(x$medium)] <- 0
+x$large[is.na(x$large)]   <- 0
+```
+
+## 3. Allocate Biomass to Size Classes
+
+```{r}
+# proportion of relative abundance/biomass allocated to each size class
+
+#Replace Loop
+x <- x %>% 
+  mutate(
+    nsmall   = ABUNDANCE.y * small / (small + medium + large),
+    nmedium  = ABUNDANCE.y * medium / (small + medium + large),
+    nlarge   = ABUNDANCE.y * large / (small + medium + large),
+    nsmall   = ifelse(is.na(nsmall) == T, 0, nsmall),
+    nmedium  = ifelse(is.na(nmedium) == T, 0, nmedium),
+    nlarge   = ifelse(is.na(nlarge) == T, 0, nlarge),
+    bsmall   = BIOMASS.y * small / (small + medium + large),
+    bmedium  = BIOMASS.y * medium / (small + medium + large),
+    blarge   = BIOMASS.y * large / (small + medium + large),
+    bsmall   = ifelse(is.na(bsmall) == T, 0, bsmall),
+    bmedium  = ifelse(is.na(bmedium) == T, 0, bmedium),
+    blarge   = ifelse(is.na(blarge) == T, 0, blarge)
+  )
+
+```
+
+## 4. Weight Biomass by Area of strata
+
+```{r,message=FALSE}
+# bring in strata area
+strataarea <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/strata area.csv"), 
+                       col_types = cols())
+
+strataarea <- select(strataarea, area, stratum)
+colnames(x)[25] <- "stratum"
+x <- left_join(x, strataarea, by = "stratum")
+
+# column names without .x or .y at the end
+colnames(x) <- str_split(string = colnames(x), pattern="[.]", simplify=TRUE)[,1]
+
+
+# specify prior area columns (statistical area and stratum size area)
+colnames(x)[c(30,53)] <- c("STATAREA","STRATUMAREA")
+
+x$AREA <- ifelse(x$stratum %in% strata_key$`Georges Bank`, "GB", "GoM")
+
+# calculate annual area/season/size class mean abundance and biomass within strata
+# area: GoM, GB
+# season: spring, fall
+# size class: small, medium, large
+q <- x %>%
+  group_by(EST_YEAR,AREA,SEASON,stratum) %>%
+  summarise(mnsmall     = mean(nsmall), 
+            mnmedium    = mean(nmedium),
+            mnlarge     = mean(nlarge),
+            mnbsmall    = mean(bsmall),
+            mnbmedium   = mean(bmedium),
+            mnblarge    = mean(blarge),
+            STRATUMAREA = mean(STRATUMAREA))
+
+# calculate stratum weights by stratum area
+q <- q %>%
+  group_by(EST_YEAR, AREA, SEASON) %>%
+  mutate(weight = STRATUMAREA / (sum(STRATUMAREA)))
+
+# calculate annual area/season/size class mean abundance and biomass across strata
+p <- q %>%
+  group_by(EST_YEAR, AREA, SEASON) %>%
+  summarise(abundance_small  = weighted.mean(mnsmall, weight),
+            abundance_medium = weighted.mean(mnmedium, weight),
+            abundance_large  = weighted.mean(mnlarge, weight),
+            biomass_small    = weighted.mean(mnbsmall, weight),
+            biomass_medium   = weighted.mean(mnbmedium, weight),
+            biomass_large    = weighted.mean(mnblarge, weight))
+
+# long format for plots
+a <- p %>%
+  pivot_longer(
+    cols = 4:9,
+    names_to = c("type", "size"),
+    names_patter = "(.*)_(.*)",
+    values_to = "value")
+```
+
+# Stratified Abundance Timeline
+
+```{r}
+# plot abundance
+strat_abundance_timeline <- a %>%
+  filter(type == "abundance")%>%
+  ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
+  geom_line(size = 1)+
+  facet_grid(AREA + SEASON ~., scales="free") +
+  labs(title = str_c(params$common_name, " - stratified mean abundance"), 
+       x = "year", 
+       y = "mean abundance per tow across strata")
+
+strat_abundance_timeline
+
+if(params$save_agg_catch == TRUE) {
+  ggsave(strat_abundance_timeline, 
+         filename = here::here("Code", "multi_species_mods", "obs_abundance", str_c(mod_details, ".png")),
+         device = "png")
+}
+```
+
+
+
+# SST at trawl locations at year i, i-1, and regional SST at year i-1
+
+```{r}
+
+#Use this code to ignore lagged aggregate catch info
+moddf <- x
+
+# now to add in SST for each trawl ID location for year i
+trawltemp <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/TrawlTemperatures2.csv"),
+                    col_names = c("ID","tempK","tempK10","anom","anom10"), col_types = cols())
+
+
+# convert Kelvin to Celsius
+trawltemp <- trawltemp %>% 
+  mutate(
+    ID = format(ID, scientific = FALSE),
+    tempC = tempK - 273.15,
+    tempC10 = tempK10 - 273.15) %>% 
+  select(ID, anom, anom10)
+
+
+```
+
+
+
+# Recipes Data Prep
+
+## 1. Format and Transform Data
+
+Format factor data, log-transform dependent vars.
+
+```{r}
+
+# join with widedat by ID
+survey_data <- left_join(moddf, trawltemp, by = "ID")
+
+#Format factors
+survey_data <- survey_data %>% 
+  mutate(
+    SEASON    = factor(SEASON, levels = c("SPRING", "FALL")),
+    SVVESSEL  = factor(SVVESSEL),
+    AREA      = factor(AREA),
+    stratum   = factor(stratum)
+  )
+
+
+
+#Log transform the abundances
+survey_data <- survey_data %>% 
+  mutate(
+    nsmall = log(nsmall + 1),
+    nmedium = log(nmedium + 1),
+    nlarge = log(nlarge + 1)
+  )
+
+
+
+#Add date columns here
+survey_data <- survey_data %>% 
+  mutate(date = as.Date(str_c(EST_YEAR, "-", EST_MONTH, "-", EST_DAY), format = "%Y-%m-%d"))
+
+
+#Time of day
+survey_tod <- survey_data %>% 
+  select(date, lon = DECDEG_BEGLON, lat = DECDEG_BEGLAT)
+  
+#Calculate the start and end periods of twilight/night/day
+survey_tod <- getSunlightTimes(data = survey_tod, keep = c("dusk", "night", "nauticalDawn", "dawn")) 
+
+
+#Also get moon phases/illumination
+survey_moon <- getMoonIllumination(date = survey_tod$date, keep = c("fraction", "phase")) %>% 
+  select(-date, moon_frac = fraction, moon_phase = phase)
+
+survey_astro <- bind_cols(survey_tod, survey_moon) %>% select(-date)
+
+
+#Add astrological predictors back in
+survey_data <- bind_cols(survey_data, survey_astro)
+
+
+
+#Time of Day Flags
+#twilight = between dusk and night or between nautical dawn and dawn
+#day = dawn to dusk
+#night = night to nautical dawn
+
+survey_data <- survey_data %>% 
+  mutate(
+    sta_dattime = ymd_hms(str_c(date, " ", EST_TIME)),
+    tod = ifelse(sta_dattime > dusk -days(1) & sta_dattime <= night, "twilight_dusk", NA),
+    tod = ifelse(sta_dattime > dusk & sta_dattime <= night + lubridate::days(1), "twilight_dusk", tod),
+    tod = ifelse(sta_dattime > nauticalDawn & sta_dattime <= dawn , "twilight_dawn", tod),
+    tod = ifelse(sta_dattime > dawn & sta_dattime <= dusk, "day", tod),
+    tod = ifelse(sta_dattime > night - lubridate::days(1)  & sta_dattime <= nauticalDawn , "night", tod),
+    tod = ifelse(sta_dattime > night  & sta_dattime <= nauticalDawn + lubridate::days(1), "night", tod),
+    tod = ifelse(is.na(tod), "twilight_dusk", tod), # these are all times after midnight between dusk/night
+    tod = factor(tod)
+  ) #count(tod)
+
+#survey_data %>% filter(is.na(tod)) %>% select(sta_dattime, dusk, night, nauticalDawn, dawn)
+
+#Moon Phase Flags
+survey_data <- survey_data %>% 
+  #transmute(
+  mutate(
+    moon_phase = moon_phase,
+    moon_phase_offset = (moon_phase - 0.0625),
+    moon_phase_offset = ifelse(moon_phase_offset < 0, 0, moon_phase_offset),
+    lunar_phase = moon_phase_offset %/% .125,
+    lunar_phase = case_when(
+      lunar_phase == 0 ~ "new",
+      lunar_phase == 1 ~ "wax_c",
+      lunar_phase == 2 ~ "q1",
+      lunar_phase == 3 ~ "wax_g",
+      lunar_phase == 4 ~ "full",
+      lunar_phase == 5 ~ "wane_g",
+      lunar_phase == 6 ~ "q3",
+      lunar_phase == 7 ~ "wane_c"
+    ),
+    lunar_phase = factor(lunar_phase)
+  )
+
+
+
+
+
+####  Resampling Thresholds  ####
+small_q <- quantile(survey_data$nsmall, 0.98)
+medium_q <- quantile(survey_data$nmedium, 0.95)
+large_q <- quantile(survey_data$nlarge, 0.95)
+
+survey_data <- survey_data %>% 
+  mutate(
+    big_catch = case_when(
+      nsmall >= small_q ~ "many_nsmall",
+      nmedium >= medium_q ~ "many_medium", 
+      nlarge >= large_q ~ "many_large", 
+      TRUE ~ "typical_low"
+    )
+  )
+
+
+
+```
+
+## 2. Split Training and Testing Set
+
+Split by proportion, or by time.
+
+```{r}
+
+#Split training and testing data
+survey_data_split <- initial_split(survey_data, prop = (7/8)) 
+
+##Leave out last few years
+#survey_data_split <- initial_time_split(survey_data, prop = (30/34)) 
+
+#Split them
+survey_training <- training(survey_data_split)
+survey_testing <- testing(survey_data_split)
+
+
+```
+
+## 3. Model Recipe
+
+Pulls the variables we want in the model for any processing steps and standardizaitons.
+
+```{r}
+
+#the code here is written really dumb so I can easily see that predictors by category at a glance
+model_recipe <-  recipe(
+  #--Outcomes--
+  #small_per_km + medium_per_km + large_per_km ~
+  nsmall + nmedium + nlarge ~ 
+    #--Predictors--
+    #Temporal Information
+    SEASON + SVVESSEL + tod + lunar_phase + 
+    #Spatial Information
+    AREA + stratum + #DECDEG_BEGLAT + DECDEG_BEGLON + 
+    #Tow Information
+    TOWDUR + BOTTEMP + #SURFTEMP + AVGDEPTH + 
+    #SST and SST ten days prior
+    anom + anom10 + 
+    #Large catch resampling flag
+    big_catch,
+    
+    #Sea State
+    #AIRTEMP + BAROPRESS + WINDDIR + WINDDIR + WAVEHGT, 
+  
+  
+  #--Data--
+  data = survey_training)
+
+
+```
+
+## 4. Recipe Summary
+
+```{r}
+summary(model_recipe) %>% knitr::kable()
+```
+
+## 5. Set Recipe Steps
+
+```{r}
+# Standard Recipe
+recipe_steps <- model_recipe %>% 
+  
+  # 1. Dealing with NA values
+  #step_meanimpute(all_numeric(), -all_outcomes()) %>% 
+  step_naomit(everything()) %>% 
+
+  # 2. Convert Factor Variables into one-hot dummy variables
+  step_dummy(all_nominal(), -big_catch) %>% 
+  
+  # 3. Re-scale numeric values to range 0-1
+  step_range(all_numeric(),  min = 0, max = 1, -all_outcomes())
+
+recipe_steps
+
+
+# Upsampling Recipe
+upsample_recipe <- recipe_steps %>% 
+  
+  # 4. Up-sample rare catch events
+  step_upsample(big_catch, over_ratio = 0.33, seed = 123, skip = FALSE)
+
+```
+
+## 6. Preparing the recipe
+
+```{r}
+prepped_recipe <- prep(recipe_steps, training = survey_training)
+prepped_recipe
+
+prepped_upsample_recipe <- prep(upsample_recipe, training = survey_training)
+prepped_upsample_recipe
+```
+
+
+
+## 7. Bake Recipe
+
+```{r}
+train_preprocessed <- bake(prepped_recipe, survey_training) %>% select(-big_catch)
+train_upsampled    <- bake(prepped_upsample_recipe, survey_training) %>% select(-big_catch)
+test_preprocessed  <- bake(prepped_recipe, survey_testing) %>% select(-big_catch)
+
+```
+
+
+
+# Keras Model Setup
+
+## 1. Data in
+
+```{r}
+# Keras model setup
+
+####  Training
+
+# Log Abundance
+train_labels_raw <- train_preprocessed %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
+train_data_raw   <- train_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+
+
+####  Upsampled Training 
+
+# Log Abundance
+train_labels <- train_upsampled %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
+train_data   <- train_upsampled %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+
+
+####  Testing
+
+# Log Abundance
+test_labels <- test_preprocessed %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
+test_data   <- test_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+
+
+```
+
+
+## 2. Define Model Structure
+
+```{r}
+
+# input layer
+inputs <- layer_input(shape = dim(train_data)[2])
+
+# two hiddent layers with dropout
+hidden <- inputs %>%
+  layer_dense(units = dim(train_data)[2],
+              activation = "relu",
+              kernel_initializer = "he_normal",
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = dim(train_data)[2],
+              activation = "relu",
+              kernel_initializer = "he_normal",
+              bias_initializer = "he_uniform") %>%
+  layer_dropout(0.2)
+
+# output for small size class
+small_output <- hidden %>% layer_dense(units = 1, name = "sml_out")
+
+# output for medium size class
+medium_output <- hidden %>% layer_dense(units = 1, name = "med_out")
+
+# output for large size class
+large_output <- hidden %>% layer_dense(units = 1, name = "lrg_out")
+
+# create model
+model <- keras_model(inputs = inputs, 
+                     outputs = c(small_output, medium_output, large_output))
+
+# compile
+model %>% compile(optimizer = "adam", 
+                  loss = "mse", 
+                  metrics = "mse", 
+                  loss_weights = list(
+                    sml_out = 1, 
+                    med_out = 1, 
+                    lrg_out = 1))
+  
+# summary
+model %>% summary()
+```
+
+## 3. Set Call-back options
+
+```{r}
+# Display training progress by printing a single dot for each completed epoch.
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 80 == 0) cat("\n")
+    cat(".")
+  }
+)    
+
+# Stop training if the validation score doesn't improve
+# The patience parameter is the amount of epochs to check for improvement.
+early_stop <- callback_early_stopping(monitor = "loss", patience = 25)
+```
+
+
+
+## 4. Train Model
+
+```{r}
+# train model and store training progress learning curves (no validation)
+history <- model %>% 
+  fit(train_data, 
+      y = list(
+        sml_out = train_labels[,1],
+        med_out = train_labels[,2],
+        lrg_out = train_labels[,3]),
+      callbacks = list(print_dot_callback, early_stop),
+      epochs = 200, 
+      verbose = 0)
+
+# model performance on test set
+eval <- evaluate(model, 
+                 test_data, 
+                 y = list(
+                   sml_out = test_labels[,1],
+                   med_out = test_labels[,2],
+                   lrg_out = test_labels[,3]), 
+                 verbose = 0)
+
+cbind(eval) %>% kable()
+```
+
+
+
+# Save Model
+
+```{r, eval = params$save_mod}
+# Save ANN model
+save_model_hdf5(object = model, 
+                filepath = here("Code", "multi_species_mods", "keras_models", str_c(mod_details, ".h5")))
+
+
+####  training and Testing Data  ####
+write_csv(train_preprocessed, 
+          path = here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")), 
+          col_names = TRUE)
+
+write_csv(test_preprocessed,
+          path = here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")), 
+          col_names = TRUE)
+
+```
+
+
+
+# Load Model Run(s)
+
+
+```{r, eval = FALSE}
+# load saved model
+model <- load_model_hdf5(
+  filepath = here("Code", "multi_species_mods", "keras_models", str_c(mod_details, ".h5"))
+  )
+
+# load training
+training <- read_csv(here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")),
+                   col_types = cols(),
+                   guess_max = 1e5)
+
+# load testing
+testing <- read_csv(here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")),
+                   col_types = cols(),
+                   guess_max = 1e5)
+
+
+```
+
+
+# Make Predictions with Test Data
+
+```{r}
+
+
+# make predictions
+test_predictions <- model %>% predict(test_data)
+test_predictions <- cbind(test_predictions[[1]],
+                          test_predictions[[2]],
+                          test_predictions[[3]])
+
+# back transform
+test_predictions <- round(exp(test_predictions) -1, 2)
+true_labels      <- round(exp(test_labels) -1, 2)
+
+# combine observed values and predictions
+results <- data.frame(
+  observed_small   = as.numeric(true_labels[,1]),
+  observed_medium  = as.numeric(true_labels[,2]),
+  observed_large   = as.numeric(true_labels[,3]),
+  predicted_small  = as.numeric(test_predictions[,1]),
+  predicted_medium = as.numeric(test_predictions[,2]),
+  predicted_large  = as.numeric(test_predictions[,3]))
+
+
+```
+
+
+# Model Diagnostics
+
+```{r}
+
+#Remember that you omitted NA's from survey testing set
+survey_testing <- survey_testing %>% 
+  #Pull the predictor columns you dropped NA values on
+  select(ID, EST_YEAR, SEASON, SVVESSEL, tod, lunar_phase, 
+         AREA, stratum, TOWDUR, BOTTEMP, anom, anom10, big_catch,
+         nsmall, nmedium, nlarge) %>% 
+  drop_na()
+
+# reshape prediction results for time series plots
+results$ID <- survey_testing$ID
+
+#Pull general meta-data needed for joining and plotting
+survey_meta <- survey_testing %>% select(ID, EST_YEAR, SEASON, SVVESSEL, AREA, stratum)
+datdat <- left_join(survey_meta, results, by = "ID")
+
+
+```
+
+## 1. Testing Data - Obs/Pred Timeline {.tabset .tabset-pills}
+
+```{r}
+#Factor Summaries
+model_summs <- datdat %>%
+  group_by(year = EST_YEAR, area = AREA, season = SEASON) %>%
+  summarise(
+    psmall  = mean(predicted_small, na.rm = T),
+    pmedium = mean(predicted_medium, na.rm = T),
+    plarge  = mean(predicted_large, na.rm = T),
+    osmall  = mean(observed_small, na.rm = T),
+    omedium = mean(observed_medium, na.rm = T),
+    olarge  = mean(observed_large, na.rm = T)
+  ) %>%
+  pivot_longer(cols=4:9,names_to=c("type","size"),values_to="abundance",names_sep=1) %>% 
+  mutate(size = factor(size, levels = c("small", "medium", "large")),
+         type = ifelse(type == "p", "Predicted", "Observed"))
+
+
+if(params$save_agg_catch == TRUE) {
+  write_csv(model_summs, here::here("Code", "multi_species_mods", "seasonal_model_inputs", 
+                                    str_c(mod_details, ".csv")),
+            col_names = T)
+}
+```
+
+### Gulf of Maine
+
+```{r}
+
+# GoM 
+(GOM_test_tl <- model_summs %>%
+  filter(area == "GoM") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  scale_color_gmri(palette = "mixed") +
+  labs(title = str_c("Gulf of Maine - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
+  facet_grid(size~ season, scales = "free") +
+  theme(legend.position = c(0.1, 0.95), 
+        legend.background = element_blank(), 
+        legend.title = element_blank()))
+
+#Export Plot
+ggsave(GOM_test_tl, 
+         filename = here("Code", "multi_species_mods", "testdat_timelines", str_c(mod_details, "GOM.png")),
+         device = "png")
+```
+
+### Georges Bank
+
+```{r}
+
+# GB 
+(GB_test_tl <- model_summs %>%
+  filter(area == "GB") %>%
+  ggplot(aes(x = year, y = abundance, group = type, color = type)) +
+  geom_line(size = 1) +
+  labs(title = str_c("Georges Bank - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
+  scale_color_gmri(palette = "mixed") +
+  facet_grid(size ~ season, scales = "free") +
+  theme(legend.position = c(0.1, 0.95), 
+        legend.background = element_blank(), 
+        legend.title = element_blank()))
+
+
+
+
+
+#Export plot
+ggsave(GB_test_tl, 
+         filename = here("Code", "multi_species_mods", "testdat_timelines", str_c(mod_details, "GB.png")),
+         device = "png")
+
+```
+
+
+## 2. Aggregate Survey Abundances
+
+```{r}
+#Factor Summaries
+testing_abundances <- datdat %>%
+  group_by(area = AREA, season = SEASON) %>%
+  summarise(
+    psmall  = sum(predicted_small, na.rm = T),
+    pmedium = sum(predicted_medium, na.rm = T),
+    plarge  = sum(predicted_large, na.rm = T),
+    osmall  = sum(observed_small, na.rm = T),
+    omedium = sum(observed_medium, na.rm = T),
+    olarge  = sum(observed_large, na.rm = T)
+  ) %>%
+  pivot_longer(cols = psmall:olarge,
+               names_to = c("type", "size"),
+               values_to = "abundance", 
+               names_sep = 1) %>% 
+  mutate(size = factor(size, levels = c("small", "medium", "large")),
+         type = ifelse(type == "p", "Predicted", "Observed"))
+
+
+agg_catch_plot <- testing_abundances %>% 
+  ggplot(aes(size, abundance, fill = type)) +
+  geom_col(position = "dodge") +
+  facet_grid(season ~ area) +
+  labs(y = "Total Abundance - Testing Data", x = NULL) +
+  scale_fill_gmri(palette = "mixed") +
+  guides(fill = guide_legend("")) +
+  theme()
+
+
+agg_catch_plot
+
+#Export plot
+ggsave(agg_catch_plot, 
+         filename = here("Code", "multi_species_mods", "agg_catch", str_c(mod_details, ".png")),
+         device = "png")
+```
+
+
+
+
+## 3. Strata Predictions {.tabset}
+
+```{r}
+####  Load Model Prediction Data  ####
+# datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
+mod_summs_sf <- strata_summs(datdat)
+```
+
+
+### Observed and Predicted {.tabset .tabset-pills}
+
+```{r}
+stratum_plots <- obs_pred_plot(mod_summs_sf, size_facets = FALSE)
+
+
+# Save Plots
+if(params$save_maps == TRUE) {
+  ggsave(stratum_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(stratum_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(stratum_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "large.png")),
+         device = "png")
+}
+
+```
+
+#### Small
+
+```{r}
+stratum_plots$small
+```
+
+
+#### Medium
+
+```{r}
+stratum_plots$medium
+```
+
+#### Large
+
+```{r}
+stratum_plots$large
+```
+
+### Prediction Differences {.tabset .tabset-pills}
+
+```{r}
+strata_diff_plots <- strata_diffs_plot(mod_summs_sf, size_facets = FALSE)
+
+
+# Save Plots
+if(params$save_maps == TRUE) {
+  ggsave(strata_diff_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(strata_diff_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(strata_diff_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "large.png")),
+         device = "png")
+}
+
+```
+
+
+#### Small
+
+```{r}
+strata_diff_plots$small
+```
+
+
+#### Medium
+
+```{r}
+strata_diff_plots$medium
+```
+
+#### Large
+
+```{r}
+strata_diff_plots$large
+```
+
+
+
+## 4. Variable importance plots
+
+```{r}
+# from https://bgreenwell.github.io/pdp/articles/pdp-example-tensorflow.html
+
+# vip randomly permutes the values of each feature and records the drop in training performance
+
+# prediction function wrapper, two arguments: object (the fitted model) and newdata
+# The function needs to return a vector of predictions (one for each observation)
+pred_wrapper <- function(object, newdata){
+  predict(object, x = as.matrix(newdata))[[2]]%>% # list 2 is medium size class
+  as.vector()
+}
+
+
+
+# Permutation-based VIP for the fitted network
+
+#Variable importance for the three size-classes
+size_classes <- c("small" = "nsmall", "medium" = "nmedium", "large" = "nlarge")
+
+
+#Map the plot function for each size class
+size_class_vip <- imap(size_classes, function(size_classes, label){
+  p1 <- vip(
+    object = model,                          # fitted model
+    method = "permute",                      # permutation-based VI scores
+    num_features = 10,                       # plots top 10 features
+    pred_wrapper = pred_wrapper,             # user-defined prediction function
+    train = as.data.frame(train_data) ,      # training data
+    target = train_labels[, size_classes],   # response values used for training (column 2 is medium size class)
+    metric = "mse",                          # evaluation metric
+    progress = "none")                       # request a text-based progress bar
+  
+  
+  # Return Plot
+  return(p1 + labs(subtitle = str_c(params$common_name, " - ", label)))
+})
+
+
+vsmall <- size_class_vip$small  + labs(x = "")
+vmed   <- size_class_vip$medium  + labs(x  = NULL)
+vlarge <- size_class_vip$large
+
+vip_all <- vsmall / vmed / vlarge
+vip_all
+
+# Save Size Class VIP Plot
+if(params$save_vip == TRUE) {
+  ggsave(vip_all,
+         filename = here("Code", "multi_species_mods", "vip_plots", str_c(mod_details, "VIP.png")),
+         device = "png")
+  }
+
+
+```
+

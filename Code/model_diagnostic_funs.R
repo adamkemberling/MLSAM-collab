@@ -9,15 +9,14 @@ library(rnaturalearth)
 
 ####  Load Strata Shapefiles  ####
 survey_strata <- read_sf(str_c(res_path, "Shapefiles/BottomTrawlStrata/BTS_Strata.shp"))
-new_england <- ne_states("united states of america") %>% st_as_sf(crs = 4326) %>% filter(region == "Northeast")
+#new_england <- ne_states("united states of america") %>% st_as_sf(crs = 4326) %>% filter(region == "Northeast")
 
 
 ####  Reshape Data for Plotting  ####
 strata_summs <- function(mod_preds) {
   mod_summs <- mod_preds %>% 
     mutate(
-      #STRATUMA = str_c("0", stratum), 
-      STRATA = as.integer(stratum),
+      STRATA = as.integer(as.character(stratum)),
       stratum = NULL) %>% 
     group_by(STRATA) %>% 
     summarise(

@@ -6,7 +6,7 @@ output: html_document
 editor_options: 
   chunk_output_type: console
 params:
-  pc: TRUE
+  pc: FALSE
   user_name: "mbarajas"
   common_name: "atlantic cod"
 ---
@@ -576,7 +576,11 @@ test_data <- as.matrix(test_data)
 test_labels <- as.matrix(test_labels)
 
 #######################################################################################
+```
 
+# Keras Model
+
+```{r}
 # keras model
 
 # input layer

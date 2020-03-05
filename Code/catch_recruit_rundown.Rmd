@@ -1,5 +1,5 @@
 ---
-title: "stock recruit plots"
+title: "Stock-Recruit Relationship in FFNN Model"
 author: "Adam A. Kemberling"
 date: "`r Sys.Date()`"
 output: 

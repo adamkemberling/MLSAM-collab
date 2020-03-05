@@ -16,10 +16,10 @@ params:
   common_name: "atlantic cod"
   small_lim: 20
   medium_lim: 60
-  save_agg_catch: TRUE
-  save_mod: TRUE
-  save_maps: TRUE
-  save_vip: TRUE
+  save_agg_catch: FALSE
+  save_mod: FALSE
+  save_maps: FALSE
+  save_vip: FALSE
 ---
 
 
@@ -302,7 +302,7 @@ trawltemp <- trawltemp %>%
 
 # Recipes Data Prep
 
-## 1. Format and Transform
+## 1. Format and Transform Data
 
 Format factor data, log-transform dependent vars.
 
@@ -331,23 +331,10 @@ survey_data <- survey_data %>%
   )
 
 
-####  Start Here  ####
-# Convert to Catch/Hectare
-# Assume constant spread * distance travelled
-# distance = tow speed * tow duration 
-# Area = Distance * Width
 
+#Add date columns here
 survey_data <- survey_data %>% 
-  mutate(
-    SPD_kmh = BOTSPEED * 1.852,            #Knots to km/h
-    TOW_DIST_km =  BOTSPEED / (60/TOWDUR),  #Divide by number of hours
-    
-    small_per_km = nsmall / TOW_DIST_km,
-    medium_per_km = nsmall / TOW_DIST_km,
-    large_per_km = nsmall / TOW_DIST_km,
-    #Add date columns here
-    date = as.Date(str_c(EST_YEAR, "-", EST_MONTH, "-", EST_DAY), format = "%Y-%m-%d")
-    )
+  mutate(date = as.Date(str_c(EST_YEAR, "-", EST_MONTH, "-", EST_DAY), format = "%Y-%m-%d"))
 
 
 #Time of day
@@ -412,6 +399,26 @@ survey_data <- survey_data %>%
   )
 
 
+
+
+
+####  Resampling Thresholds  ####
+small_q <- quantile(survey_data$nsmall, 0.98)
+medium_q <- quantile(survey_data$nmedium, 0.95)
+large_q <- quantile(survey_data$nlarge, 0.95)
+
+survey_data <- survey_data %>% 
+  mutate(
+    big_catch = case_when(
+      nsmall >= small_q ~ "many_nsmall",
+      nmedium >= medium_q ~ "many_medium", 
+      nlarge >= large_q ~ "many_large", 
+      TRUE ~ "typical_low"
+    )
+  )
+
+
+
 ```
 
 ## 2. Split Training and Testing Set
@@ -450,11 +457,16 @@ model_recipe <-  recipe(
     #Spatial Information
     AREA + stratum + #DECDEG_BEGLAT + DECDEG_BEGLON + 
     #Tow Information
-    TOWDUR + BOTTEMP + SURFTEMP + AVGDEPTH + 
+    TOWDUR + BOTTEMP + #SURFTEMP + AVGDEPTH + 
     #SST and SST ten days prior
     anom + anom10 + 
+    #Large catch resampling flag
+    big_catch,
+    
     #Sea State
-    AIRTEMP + BAROPRESS + WINDDIR + WINDDIR + WAVEHGT, 
+    #AIRTEMP + BAROPRESS + WINDDIR + WINDDIR + WAVEHGT, 
+  
+  
   #--Data--
   data = survey_training)
 
@@ -470,20 +482,28 @@ summary(model_recipe) %>% knitr::kable()
 ## 5. Set Recipe Steps
 
 ```{r}
+# Standard Recipe
 recipe_steps <- model_recipe %>% 
-  #Mean impute numeric variables
-  step_meanimpute(all_numeric(), -all_outcomes()) %>% 
   
-  #Convert Factor Variables into one-hot dummy variables
-  step_dummy(all_nominal()) %>% 
+  # 1. Dealing with NA values
+  #step_meanimpute(all_numeric(), -all_outcomes()) %>% 
+  step_naomit(everything()) %>% 
+
+  # 2. Convert Factor Variables into one-hot dummy variables
+  step_dummy(all_nominal(), -big_catch) %>% 
   
-  #Re-scale numeric values to range 0-1
-  step_range(all_numeric(),  min = 0, max = 1,-all_outcomes()) # %>% 
-  
-  #Remove variables that are unchanging 
-  #step_nzv(all_predictors())
+  # 3. Re-scale numeric values to range 0-1
+  step_range(all_numeric(),  min = 0, max = 1, -all_outcomes())
 
 recipe_steps
+
+
+# Upsampling Recipe
+upsample_recipe <- recipe_steps %>% 
+  
+  # 4. Up-sample rare catch events
+  step_upsample(big_catch, over_ratio = 0.33, seed = 123, skip = FALSE)
+
 ```
 
 ## 6. Preparing the recipe
@@ -491,13 +511,19 @@ recipe_steps
 ```{r}
 prepped_recipe <- prep(recipe_steps, training = survey_training)
 prepped_recipe
+
+prepped_upsample_recipe <- prep(upsample_recipe, training = survey_training)
+prepped_upsample_recipe
 ```
+
+
 
 ## 7. Bake Recipe
 
 ```{r}
-train_preprocessed <- bake(prepped_recipe, survey_training) 
-test_preprocessed <-  bake(prepped_recipe, survey_testing) 
+train_preprocessed <- bake(prepped_recipe, survey_training) %>% select(-big_catch)
+train_upsampled    <- bake(prepped_upsample_recipe, survey_training) %>% select(-big_catch)
+test_preprocessed  <- bake(prepped_recipe, survey_testing) %>% select(-big_catch)
 
 ```
 
@@ -513,22 +539,23 @@ test_preprocessed <-  bake(prepped_recipe, survey_testing)
 ####  Training
 
 # Log Abundance
-train_labels <- train_preprocessed %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
-train_data <- train_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+train_labels_raw <- train_preprocessed %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
+train_data_raw   <- train_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
 
-# # Log Catch / km
-# train_labels <- train_preprocessed %>% select(small_per_km, medium_per_km, large_per_km) %>% as.matrix()
-# train_data   <- train_preprocessed %>% select(-c(small_per_km, medium_per_km, large_per_km)) %>% as.matrix()
+
+####  Upsampled Training 
+
+# Log Abundance
+train_labels <- train_upsampled %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
+train_data   <- train_upsampled %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+
 
 ####  Testing
 
 # Log Abundance
 test_labels <- test_preprocessed %>% select(nsmall, nmedium, nlarge) %>% as.matrix()
-test_data <- test_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
+test_data   <- test_preprocessed %>% select(-nsmall, -nmedium, -nlarge) %>% as.matrix()
 
-# # Log Catch / km
-# test_labels <- test_preprocessed %>% select(small_per_km, medium_per_km, large_per_km) %>% as.matrix()
-# test_data   <- test_preprocessed %>% select(-c(small_per_km, medium_per_km, large_per_km)) %>% as.matrix()
 
 ```
 
@@ -656,12 +683,12 @@ model <- load_model_hdf5(
   )
 
 # load training
-training<-read_csv(here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")),
+training <- read_csv(here::here("Code", "multi_species_mods", "train_dat", str_c(mod_details, "train.csv")),
                    col_types = cols(),
                    guess_max = 1e5)
 
 # load testing
-testing<-read_csv(here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")),
+testing <- read_csv(here::here("Code", "multi_species_mods", "test_dat", str_c(mod_details, "test.csv")),
                    col_types = cols(),
                    guess_max = 1e5)
 
@@ -700,6 +727,15 @@ results <- data.frame(
 # Model Diagnostics
 
 ```{r}
+
+#Remember that you omitted NA's from survey testing set
+survey_testing <- survey_testing %>% 
+  #Pull the predictor columns you dropped NA values on
+  select(ID, EST_YEAR, SEASON, SVVESSEL, tod, lunar_phase, 
+         AREA, stratum, TOWDUR, BOTTEMP, anom, anom10, big_catch,
+         nsmall, nmedium, nlarge) %>% 
+  drop_na()
+
 # reshape prediction results for time series plots
 results$ID <- survey_testing$ID
 
@@ -707,10 +743,7 @@ results$ID <- survey_testing$ID
 survey_meta <- survey_testing %>% select(ID, EST_YEAR, SEASON, SVVESSEL, AREA, stratum)
 datdat <- left_join(survey_meta, results, by = "ID")
 
-# # carry over n abundance columns to observed abundance columns to resolve left_join NAs
-# datdat$observed_small <- datdat$nsmall
-# datdat$observed_medium <- datdat$nmedium
-# datdat$observed_large <- datdat$nlarge
+
 ```
 
 ## 1. Testing Data - Obs/Pred Timeline {.tabset .tabset-pills}
@@ -731,6 +764,12 @@ model_summs <- datdat %>%
   mutate(size = factor(size, levels = c("small", "medium", "large")),
          type = ifelse(type == "p", "Predicted", "Observed"))
 
+
+if(params$save_agg_catch == TRUE) {
+  write_csv(model_summs, here::here("Code", "multi_species_mods", "seasonal_model_inputs", 
+                                    str_c(mod_details, ".csv")),
+            col_names = T)
+}
 ```
 
 ### Gulf of Maine

@@ -1,0 +1,355 @@
+---
+title: "RNN: lookback 6 seasons, predict 1 season ahead"
+author: "MFBarajas"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+params:
+  pc: TRUE
+  user_name: "mbarajas"
+  common_name: "atlantic cod"
+---
+
+```{r,warning=FALSE,message=FALSE}
+# Libraries
+library(tidyverse)
+library(here)
+library(keras)
+library(gmRi)
+
+#Set appropriate path to box
+if(params$pc == TRUE) {
+  # MB setup
+
+  user.name <- params$user_name
+
+  mills_path <- shared.path(os.use = "windows", group = "Mills Lab", folder = NULL)
+  
+} else {
+  mills_path <- shared.path(os.use = "unix", group = "Mills Lab", folder = NULL)
+  reticulate::use_condaenv("rkeras2020")
+}
+
+#Helper Funs
+source(here("code/data_cleanup_funs.R"))
+source(here("code/data_reshaping_funs.R"))
+
+#GGplot theme
+theme_set(theme_bw())
+```
+
+# survey model output as input for seasonal model
+
+```{r}
+
+# time series of abundance as catch/standard tow
+# output of survey model grouped on year, area, season
+# calculated average observed and predicted of each size class
+survey<-read_csv(str_c(mills_path,"Projects/NSF_CAccel/Data/atlantic_cod2060.csv"),col_types=cols())
+
+# reshape to wide format
+survey<-survey%>%pivot_wider(names_from=c(area,season,size,type),values_from=abundance,values_fill=list(abundance=0))
+```
+
+# catch data
+
+```{r,message=FALSE}
+###############################################################################################
+# catch data for year i
+gomcatch <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/gom_catch_at_age_19.csv"), 
+                     col_types = cols()) # ages 1-9+ years 1982-2018
+gbcatch <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/gb_catch_at_age_19.csv"), 
+                    col_types = cols()) # ages 1-10+ years 1978-2014
+# age overlap is ages 1-9+
+# year overlap is years 1982-2014
+
+# remove + signs in column names
+colnames(gomcatch)[10]<-"age_9plus"
+colnames(gbcatch)[11]<-"age_10"
+
+# for GB, combine age 9 and 10+
+gbcatch<-gbcatch%>%mutate(age_9plus=age_9+age_10)
+gbcatch<-select(gbcatch,-c(age_9,age_10))
+
+# remove years prior to 1982 for GB
+gbcatch<-gbcatch%>%filter(year>=1982)
+
+# remove years after 2014 for GoM
+gomcatch<-gomcatch%>%filter(year<=2014)
+
+# rename columns to specify GoM or GB
+# catch = c, r1 = GoM, r2 = GB
+colnames(gomcatch)[2:10]<-paste("c_r1_",colnames(gomcatch)[2:10],sep="")
+colnames(gbcatch)[2:10]<-paste("c_r2_",colnames(gbcatch)[2:10],sep="")
+catch<-left_join(gomcatch,gbcatch,by="year")
+```
+
+# SST data
+
+```{r,message=FALSE}
+###############################################################################################
+# Regional SST for year i
+SST_GB <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/SSTdata_GB.csv"),
+                 col_names = c("year","yranom_gb","year2","m1_gb","m2_gb","m3_gb","m4_gb","m5_gb",
+                               "m6_gb","m7_gb","m8_gb","m9_gb","m10_gb","m11_gb","m12_gb", "year3",
+                               "m1anom_gb","m2anom_gb","m3anom_gb","m4anom_gb","m5anom_gb","m6anom_gb",
+                               "m7anom_gb","m8anom_gb","m9anom_gb","m10anom_gb","m11anom_gb","m12anom_gb"),
+                 col_types = cols())
+
+SST_GoM <- read_csv(str_c(mills_path, "Projects/NSF_CAccel/Data/SSTdata_GOM.csv"),
+                  col_names=c("year","yranom_gom","year2","m1_gom","m2_gom","m3_gom","m4_gom","m5_gom",
+                              "m6_gom","m7_gom","m8_gom","m9_gom","m10_gom","m11_gom","m12_gom","year3",
+                              "m1anom_gom","m2anom_gom","m3anom_gom","m4anom_gom","m5anom_gom","m6anom_gom",
+                              "m7anom_gom","m8anom_gom","m9anom_gom","m10anom_gom","m11anom_gom","m12anom_gom"),
+                  col_types = cols())
+
+# remove extra year columns
+SST_GB<-select(SST_GB,-c(year2,year3))
+SST_GoM<-select(SST_GoM,-c(year2,year3))
+
+# join data frames together
+SST<-left_join(SST_GoM,SST_GB,by="year")
+```
+
+# combine survey, catch, and sst data together
+
+```{r,message=FALSE}
+
+# annual stratified mean survey abundance by area/season/size 1982:2015
+#survey<-survey[,1:13]
+
+# annual catch age-1 to age-9+ by area 1982:2014
+#catch
+
+# annual temperature anomaly by region 1982:2019
+# monthly temperature anomaly by region 1982:2019
+# monthly average temperature by region 1982:2019
+SST<-SST[-1,]
+
+# combine
+alldata<-inner_join(survey,catch,by="year")
+alldata<-inner_join(alldata,SST,by="year")
+
+# don't include SST anomaly
+dat<-alldata[,-c(44,57:69,82:93)]
+
+```
+
+# timestep at season level
+
+```{r}
+
+# spring columns
+spr<-c(1,2:7,14:19,26:43,44:49,56:61)
+
+# fall columns
+fal<-c(1,8:13,20:25,26:43,50:55,62:67)
+
+# empty data frame
+seasondat<-data.frame(matrix(NaN,nrow=1,ncol=length(spr)))
+
+# column names
+colnames(seasondat)<-c("year",
+                       "gb_sml_pr","gb_med_pr","gb_lrg_pr","gb_sml_ob","gb_med_ob","gb_lrg_ob",
+                       "gom_sml_pr","gom_med_pr","gom_lrg_pr","gom_sml_ob","gom_med_ob","gom_lrg_ob",
+                       "c_r1_age_1","c_r1_age_2","c_r1_age_3","c_r1_age_4","c_r1_age_5","c_r1_age_6",
+                       "c_r1_age_7","c_r1_age_8","c_r1_age_9plus",
+                       "c_r2_age_1","c_r2_age_2","c_r2_age_3","c_r2_age_4","c_r2_age_5","c_r2_age_6",
+                       "c_r2_age_7","c_r2_age_8","c_r2_age_9plus",
+                       "m1_gom","m2_gom","m3_gom","m4_gom","m5_gom","m6_gom",
+                       "m1_gb","m2_gb","m3_gb","m4_gb","m5_gb","m6_gb")
+
+# stack seasons
+for(i in 1:nrow(dat)){seasondat<-rbind(seasondat,as.numeric(dat[i,spr]),as.numeric(dat[i,fal]))}
+
+# remove empty row
+seasondat<-seasondat[-1,]
+row.names(seasondat)<-NULL
+
+# timestep snapshots every june and december
+timestp<-cbind(paste(c(1982:2014),"-06-30",sep=""),paste(c(1982:2014),"-12-31",sep=""))
+x<-c()
+for(i in 1:33){
+  x<-c(x,timestp[i,1],timestp[i,2])
+}
+seasondat$Date<-as.Date(x)
+
+# reorder columns
+seasondat<-seasondat[,c(44,11:13,5:7,8:10,2:4,14:43)]
+
+# 6-month average temperature for both regions
+seasondat<-seasondat%>%mutate(past6_mon_ave_gom=(m1_gom+m2_gom+m3_gom+m4_gom+m5_gom+m6_gom)/6)
+seasondat<-seasondat%>%mutate(past6_mon_ave_gb=(m1_gb+m2_gb+m3_gb+m4_gb+m5_gb+m6_gb)/6)
+
+# remove months
+seasondat<-seasondat[,-c(32:43)]
+
+# plot
+seasondat%>%
+  pivot_longer(cols=2:7,
+               names_to=c("area","size","type"),
+               names_pattern="(.*)_(.*)_(.*)",
+               values_to="value")%>%
+  ggplot(aes(x=Date,y=value))+
+  geom_line(size=1)+
+  labs(y="catch / standard tow")+
+  facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
+
+```
+
+# moving block sub sampling
+
+```{r}
+# data frame
+fish<-data.frame(seasondat)
+
+# model parameters
+max_len<-6 # look back 6 timesteps
+
+# get vector of starting places, overlap by 6
+start_indexes<-seq(1,nrow(fish)-(max_len),by=1)
+
+# training rows, pick even number to end on a fall timestep
+training_index<-1:52
+
+# scale all data with stats from only the training data
+mean<-apply(fish[training_index,-1],2,mean)
+std<-apply(fish[training_index,-1],2,sd)
+fish[,2:ncol(fish)]<-scale(fish[,-1],center=mean,scale=std)
+
+# empty matrix
+fish_cube<-array(NaN,c(length(start_indexes),max_len+1,ncol(fish)-1))
+
+# fill cube with data sequences
+for(j in 1:(ncol(fish)-1)){
+  for(i in 1:nrow(fish_cube)){
+    fish_cube[i,,j]<-fish[start_indexes[i]:(start_indexes[i]+max_len),j+1]
+  }
+}
+```
+
+# split data into training and testing sets
+
+```{r}
+# trim off prediction timestep
+X<-fish_cube[,-ncol(fish_cube),]
+
+# select label
+label<-1:6
+LABELS<-fish_cube[,ncol(fish_cube),label]
+
+# training
+features_train<-array(X[training_index,,],dim=c(length(training_index),max_len,dim(fish_cube)[3]))
+labels_train<-LABELS[training_index,]
+
+# testing
+features_test<-array(X[-training_index,,],dim=c(dim(LABELS)[1]-length(training_index),max_len,dim(fish_cube)[3]))
+labels_test<-LABELS[-training_index,]
+```
+
+# build and train
+
+```{r,message=FALSE}
+# input layer
+inputs <- layer_input(shape = dim(features_train)[2:3])
+
+# hidden layers, long short term memory
+hidden<- inputs %>% 
+  layer_lstm(units=dim(features_train)[3],dropout=0.1,recurrent_dropout=0.5,
+             kernel_initializer="he_normal",bias_initializer="he_uniform",return_sequences=TRUE)%>%
+  layer_lstm(units=dim(features_train)[3],dropout=0.1,recurrent_dropout=0.5,
+             kernel_initializer="he_normal",bias_initializer="he_uniform",activation="relu")
+
+# output for small size class
+gom_sml_out <- hidden %>% layer_dense(units=1,name="gom_sml")
+
+# output for medium size class
+gom_med_out <- hidden %>% layer_dense(units=1,name="gom_med")
+
+# output for large size class
+gom_lrg_out <- hidden %>% layer_dense(units=1,name="gom_lrg")
+
+# output for small size class
+gb_sml_out <- hidden %>% layer_dense(units=1,name="gb_sml")
+
+# output for medium size class
+gb_med_out <- hidden %>% layer_dense(units=1,name="gb_med")
+
+# output for large size class
+gb_lrg_out <- hidden %>% layer_dense(units=1,name="gb_lrg")
+
+# create model
+model <- keras_model(inputs = inputs, outputs = c(gom_sml_out,
+                                                  gom_med_out,
+                                                  gom_lrg_out,
+                                                  gb_sml_out,
+                                                  gb_med_out,
+                                                  gb_lrg_out))
+
+# compile
+model %>% compile(optimizer = "adam", loss = "mse", metrics = "mse",loss_weights = list(gom_sml=1,
+                                                                                        gom_med=1,
+                                                                                        gom_lrg=1,
+                                                                                        gb_sml=1,
+                                                                                        gb_med=1,
+                                                                                        gb_lrg=1))
+
+# summary
+summary(model)
+
+# train
+learningcurves <- model %>% fit(x = features_train,  y=list(gom_sml=labels_train[,1],
+                                                            gom_med=labels_train[,2],
+                                                            gom_lrg=labels_train[,3],
+                                                            gb_sml=labels_train[,4],
+                                                            gb_med=labels_train[,5],
+                                                            gb_lrg=labels_train[,6]),
+                                batch_size = 1, epochs = 100, verbose = 1)
+
+# plot learning curves
+plot(learningcurves)
+```
+
+# predict and plot
+
+```{r}
+# model performance on test set
+evaluate(model,features_test,y=list(gom_sml=labels_test[,1],
+                                    gom_med=labels_test[,2],
+                                    gom_lrg=labels_test[,3],
+                                    gb_sml=labels_test[,4],
+                                    gb_med=labels_test[,5],
+                                    gb_lrg=labels_test[,6]),verbose=0)
+
+# make predictions
+preds<-model%>%predict(features_test)
+preds<-cbind(preds[[1]],preds[[2]],preds[[3]],preds[[4]],preds[[5]],preds[[6]])
+
+# unscale
+preds<-t((t(preds)*std[label])+mean[label])
+y<-t((t(fish[,(label+1)])*std[label])+mean[label])
+
+# observed
+res<-data.frame(year=fish$Date,y)
+colnames(res)<-c("Date",paste(names(mean[label]),"obs",sep="_"))
+
+# predicted
+predrows<-((nrow(fish)-dim(features_test)[1])+1):nrow(fish)
+preds<-data.frame(year=fish$Date[predrows],preds)
+colnames(preds)<-c("Date",paste(names(mean[label]),"pred",sep="_"))
+
+# combine together
+res<-left_join(res,preds,"Date")
+
+# long format
+res<-res%>%pivot_longer(cols=2:13,names_to=c("area","size","type1","type2"),
+                        names_pattern="(.*)_(.*)_(.*)_(.*)",
+                        values_to="value")
+
+# plot
+res%>%
+  ggplot(aes(x=Date,y=value,color=type2))+
+  geom_line(size=1)+
+  facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
+```

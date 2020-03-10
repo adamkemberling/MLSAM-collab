@@ -7,7 +7,11 @@ output:
     toc: true
     toc_float:
       collapsed: true
-    code_folding: hide
+    code_folding: show
+    includes:
+        before_body: stylesheets/gmri_logo_header.html
+        after_body: stylesheets/akemberling_gmri_footer.html
+    css: stylesheets/gmri_rmarkdown.css
 editor_options: 
   chunk_output_type: console
 params:
@@ -121,8 +125,9 @@ cod          <- species_pull$cod
 codtow       <- species_pull$codtow
 
 
-# one row for every unique ID
+# Pull station info, one row for every unique ID
 dat <- dat %>% distinct(ID, .keep_all = TRUE)
+
 ```
 
 ## 2. Set Size classes
@@ -141,7 +146,8 @@ cod <- cod %>%
 
 
 # for each ID, count number of small, medium, and large
-x <- cod %>% pivot_wider(id_cols = ID, names_from = SIZE, values_from = NUM, values_fn = list(NUM = sum))
+x <- cod %>% 
+  pivot_wider(id_cols = ID, names_from = SIZE, values_from = NUM, values_fn = list(NUM = sum))
 
 # join with codtow
 codtow <- left_join(codtow, x, by="ID")
@@ -172,9 +178,7 @@ x$large[is.na(x$large)]   <- 0
 ## 3. Allocate Biomass to Size Classes
 
 ```{r}
-# proportion of relative abundance/biomass allocated to each size class
-
-#Replace Loop
+# Allocate abundance/biomass by proportions of each size class
 x <- x %>% 
   mutate(
     nsmall   = ABUNDANCE.y * small / (small + medium + large),
@@ -191,9 +195,10 @@ x <- x %>%
     blarge   = ifelse(is.na(blarge) == T, 0, blarge)
   )
 
+
 ```
 
-## 4. Weight Biomass by Area of strata
+## 4. Weight Biomass by Stratum Area for Plot
 
 ```{r,message=FALSE}
 # bring in strata area
@@ -251,31 +256,110 @@ a <- p %>%
     values_to = "value")
 ```
 
-# Stratified Abundance Timeline
+# Observed Abundance Timeline {.tabset .tabset-pills}
+
+
+## Raw Totals {.tabset}
 
 ```{r}
+
+#Raw Abundance/Biomass Totals
+raw_tots <- x %>% 
+  group_by(EST_YEAR, AREA, SEASON) %>% 
+  summarise(nsmall     = sum(nsmall, na.rm = T), 
+            nmedium    = sum(nmedium, na.rm = T),
+            nlarge     = sum(nlarge, na.rm = T),
+            bsmall     = sum(bsmall, na.rm = T),
+            bmedium     = sum(bmedium, na.rm = T),
+            blarge     = sum(blarge, na.rm = T)
+            ) 
+
+p1 <- raw_tots %>% 
+  pivot_longer(names_to = "size", values_to = "abundance", cols = nsmall:nlarge) %>% 
+  ggplot(aes(EST_YEAR, abundance, color = size)) +
+  geom_line(size = 1) +
+  facet_grid(AREA + SEASON ~., scales="free") + 
+  labs(title = str_c(str_to_title(params$common_name), " - Total Observed Abundance"), 
+       x = NULL, 
+       y = "Total Abundance")
+
+
+p2 <- raw_tots %>% 
+  pivot_longer(names_to = "size", values_to = "biomass", cols = bsmall:blarge) %>% 
+  ggplot(aes(EST_YEAR, biomass, color = size)) +
+  geom_line(size = 1) +
+  facet_grid(AREA + SEASON ~., scales="free") + 
+  labs(title = str_c(str_to_title(params$common_name), " - Total Observed Biomass"), 
+       x = NULL, 
+       y = "Biomass (kg)")
+
+#Export the raw abundance timeline
+if(params$save_agg_catch == TRUE) {
+  ggsave(
+    p1,
+    #strat_abundance_timeline, 
+    filename = here::here("Code", "multi_species_mods", "obs_abundance", str_c(mod_details, ".png")),
+    device = "png")
+}
+
+```
+
+### Abundance
+
+```{r}
+p1
+```
+
+### Biomass
+
+```{r}
+p2
+```
+
+
+## Stratum-Area Weighted {.tabset}
+
+```{r}
+
 # plot abundance
 strat_abundance_timeline <- a %>%
   filter(type == "abundance")%>%
   ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
   geom_line(size = 1)+
   facet_grid(AREA + SEASON ~., scales="free") +
-  labs(title = str_c(params$common_name, " - stratified mean abundance"), 
-       x = "year", 
-       y = "mean abundance per tow across strata")
+  labs(title = str_c(str_to_title(params$common_name), " - Area-Weighted Mean Abundance"), 
+       x = NULL, 
+       y = "Mean-Abundance / Station")
 
+
+#Plot Biomass
+strat_biomass_timeline <- a %>%
+  filter(type == "biomass")%>%
+  ggplot(aes(x = EST_YEAR, y = value, group = size, color = size))+
+  geom_line(size = 1)+
+  facet_grid(AREA + SEASON ~., scales="free") +
+  labs(title = str_c(str_to_title(params$common_name), " - Area-Weighted Mean Biomass"), 
+       x = NULL, 
+       y = "Mean-Biomass (kg) / Station")
+
+
+```
+
+### Abundance
+
+```{r}
 strat_abundance_timeline
-
-if(params$save_agg_catch == TRUE) {
-  ggsave(strat_abundance_timeline, 
-         filename = here::here("Code", "multi_species_mods", "obs_abundance", str_c(mod_details, ".png")),
-         device = "png")
-}
 ```
 
 
+### Biomass
 
-# SST at trawl locations at year i, i-1, and regional SST at year i-1
+```{r}
+strat_biomass_timeline
+```
+
+
+# SST Anomalies
 
 ```{r}
 
@@ -318,6 +402,17 @@ survey_data <- survey_data %>%
     SVVESSEL  = factor(SVVESSEL),
     AREA      = factor(AREA),
     stratum   = factor(stratum)
+  )
+
+
+
+#Convert abundance to abundance/area in km2
+#1 ST with Albatross = 0.038km2
+survey_data <- survey_data %>% 
+  mutate(
+    nsmall = nsmall / 0.0384,
+    nmedium = nmedium / 0.0384,
+    nlarge = nlarge / 0.0384
   )
 
 
@@ -404,8 +499,8 @@ survey_data <- survey_data %>%
 
 ####  Resampling Thresholds  ####
 small_q <- quantile(survey_data$nsmall, 0.98)
-medium_q <- quantile(survey_data$nmedium, 0.95)
-large_q <- quantile(survey_data$nlarge, 0.95)
+medium_q <- quantile(survey_data$nmedium, 0.98)
+large_q <- quantile(survey_data$nlarge, 0.98)
 
 survey_data <- survey_data %>% 
   mutate(
@@ -428,9 +523,14 @@ Split by proportion, or by time.
 ```{r}
 
 #Split training and testing data
-survey_data_split <- initial_split(survey_data, prop = (7/8)) 
+#Not enough data to stratify
+#survey_data <- survey_data %>% mutate(kfold_strata = str_c(EST_YEAR)) 
+#survey_data_split <- initial_split(survey_data, prop = (4/5), strata = "kfold_strata") 
 
-##Leave out last few years
+#non-stratified split
+survey_data_split <- initial_split(survey_data, prop = (4/5)) 
+
+## Or... Leave out last few years
 #survey_data_split <- initial_time_split(survey_data, prop = (30/34)) 
 
 #Split them
@@ -456,7 +556,7 @@ model_recipe <-  recipe(
     SEASON + SVVESSEL + tod + lunar_phase + 
     #Spatial Information
     AREA + stratum + #DECDEG_BEGLAT + DECDEG_BEGLON + 
-    #Tow Information
+    # #Tow Information
     TOWDUR + BOTTEMP + #SURFTEMP + AVGDEPTH + 
     #SST and SST ten days prior
     anom + anom10 + 
@@ -502,7 +602,7 @@ recipe_steps
 upsample_recipe <- recipe_steps %>% 
   
   # 4. Up-sample rare catch events
-  step_upsample(big_catch, over_ratio = 0.33, seed = 123, skip = FALSE)
+  step_upsample(big_catch, over_ratio = 0.5, seed = 123, skip = FALSE)
 
 ```
 
@@ -701,13 +801,12 @@ testing <- read_csv(here::here("Code", "multi_species_mods", "test_dat", str_c(m
 ```{r}
 
 
-# make predictions
+# Make predictions
 test_predictions <- model %>% predict(test_data)
 test_predictions <- cbind(test_predictions[[1]],
                           test_predictions[[2]],
-                          test_predictions[[3]])
-
-# back transform
+                          test_predictions[[3]]) 
+# Undo log-transformation
 test_predictions <- round(exp(test_predictions) -1, 2)
 true_labels      <- round(exp(test_labels) -1, 2)
 
@@ -729,10 +828,12 @@ results <- data.frame(
 ```{r}
 
 #Remember that you omitted NA's from survey testing set
+#Pull the predictor columns you dropped NA values on
 survey_testing <- survey_testing %>% 
-  #Pull the predictor columns you dropped NA values on
-  select(ID, EST_YEAR, SEASON, SVVESSEL, tod, lunar_phase, 
-         AREA, stratum, TOWDUR, BOTTEMP, anom, anom10, big_catch,
+  select(ID, EST_YEAR, SEASON, SVVESSEL, 
+         tod, lunar_phase, 
+         AREA, stratum, TOWDUR, BOTTEMP, 
+         anom, anom10, big_catch,
          nsmall, nmedium, nlarge) %>% 
   drop_na()
 
@@ -743,10 +844,17 @@ results$ID <- survey_testing$ID
 survey_meta <- survey_testing %>% select(ID, EST_YEAR, SEASON, SVVESSEL, AREA, stratum)
 datdat <- left_join(survey_meta, results, by = "ID")
 
+#datdat contains the testing predictions and the observed values 
+#as well as the station information that goes with them
 
+#also want stratum area
+strataarea <- select(strataarea, stratum, area) %>% mutate(stratum = factor(stratum))
+datdat <- datdat %>% left_join(strataarea, by = "stratum")
 ```
 
 ## 1. Testing Data - Obs/Pred Timeline {.tabset .tabset-pills}
+
+The following figures show the prediction accuracy of the model when applied to the testing data. "Observed" values are what the actual numbers were at stations from the testing data, and "predicted" values are what the model inferred for those stations.
 
 ```{r}
 #Factor Summaries
@@ -780,13 +888,15 @@ if(params$save_agg_catch == TRUE) {
 (GOM_test_tl <- model_summs %>%
   filter(area == "GoM") %>%
   ggplot(aes(x = year, y = abundance, group = type, color = type)) +
-  geom_line(size = 1) +
-  scale_color_gmri(palette = "mixed") +
-  labs(title = str_c("Gulf of Maine - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
-  facet_grid(size~ season, scales = "free") +
-  theme(legend.position = c(0.1, 0.95), 
-        legend.background = element_blank(), 
-        legend.title = element_blank()))
+    geom_line(size = 1) +
+    scale_color_gmri(palette = "mixed") +
+    facet_grid(size~ season, scales = "free") +
+    labs(title = str_c("Gulf of Maine - ", str_to_title(params$common_name)), 
+         x = NULL, 
+         y = expression(paste("Mean Abundance / km" ^2))) +
+    theme(legend.position = c(0.1, 0.95), 
+          legend.background = element_blank(), 
+          legend.title = element_blank()))
 
 #Export Plot
 ggsave(GOM_test_tl, 
@@ -803,9 +913,11 @@ ggsave(GOM_test_tl,
   filter(area == "GB") %>%
   ggplot(aes(x = year, y = abundance, group = type, color = type)) +
   geom_line(size = 1) +
-  labs(title = str_c("Georges Bank - ", params$common_name), x = NULL, y = "Mean Abundance per Station") +
   scale_color_gmri(palette = "mixed") +
   facet_grid(size ~ season, scales = "free") +
+   labs(title = str_c("Gulf of Maine - ", str_to_title(params$common_name)), 
+         x = NULL, 
+         y = expression(paste("Mean Abundance / km" ^2))) +
   theme(legend.position = c(0.1, 0.95), 
         legend.background = element_blank(), 
         legend.title = element_blank()))
@@ -824,37 +936,81 @@ ggsave(GB_test_tl,
 
 ## 2. Aggregate Survey Abundances
 
+Aggregate abundances are estimated by calculating the average cpue for each stratum for each season, then multiplying by the stratum area to get a total abundance per stratum. Stratum totals are then added together to got total aggregate abundances.
+
 ```{r}
-#Factor Summaries
-testing_abundances <- datdat %>%
+
+#Total Biomass Estimates from test data and test data predictions
+total_abundance_testing <- datdat %>% 
+  mutate(
+    psmall  = predicted_small * area,
+    pmedium = predicted_medium * area,
+    plarge  = predicted_large * area,
+    osmall  = observed_small * area,
+    omedium = observed_medium * area,
+    olarge  = observed_large * area
+  ) %>% 
   group_by(area = AREA, season = SEASON) %>%
   summarise(
-    psmall  = sum(predicted_small, na.rm = T),
-    pmedium = sum(predicted_medium, na.rm = T),
-    plarge  = sum(predicted_large, na.rm = T),
-    osmall  = sum(observed_small, na.rm = T),
-    omedium = sum(observed_medium, na.rm = T),
-    olarge  = sum(observed_large, na.rm = T)
+    psmall  = sum(psmall, na.rm = T),
+    pmedium = sum(pmedium, na.rm = T),
+    plarge  = sum(plarge, na.rm = T),
+    osmall  = sum(osmall, na.rm = T),
+    omedium = sum(omedium, na.rm = T),
+    olarge  = sum(olarge, na.rm = T)
   ) %>%
   pivot_longer(cols = psmall:olarge,
                names_to = c("type", "size"),
-               values_to = "abundance", 
+               values_to = "Total Abundance", 
                names_sep = 1) %>% 
   mutate(size = factor(size, levels = c("small", "medium", "large")),
          type = ifelse(type == "p", "Predicted", "Observed"))
 
-
-agg_catch_plot <- testing_abundances %>% 
-  ggplot(aes(size, abundance, fill = type)) +
+agg_catch_plot <- total_abundance_testing %>% 
+  ggplot(aes(size, `Total Abundance`, fill = type)) +
   geom_col(position = "dodge") +
   facet_grid(season ~ area) +
-  labs(y = "Total Abundance - Testing Data", x = NULL) +
+  labs(
+    y = "Total Abundances", 
+    x = NULL,
+    caption = "Data Source: Testing Data") +
   scale_fill_gmri(palette = "mixed") +
+  scale_y_continuous(labels = scales::comma_format()) +
   guides(fill = guide_legend("")) +
   theme()
 
-
 agg_catch_plot
+
+# #Factor Summaries - no longer makes sense using CPUE instead of station abundance
+# testing_abundances <- datdat %>%
+#   group_by(area = AREA, season = SEASON) %>%
+#   summarise(
+#     psmall  = sum(predicted_small, na.rm = T),
+#     pmedium = sum(predicted_medium, na.rm = T),
+#     plarge  = sum(predicted_large, na.rm = T),
+#     osmall  = sum(observed_small, na.rm = T),
+#     omedium = sum(observed_medium, na.rm = T),
+#     olarge  = sum(observed_large, na.rm = T)
+#   ) %>%
+#   pivot_longer(cols = psmall:olarge,
+#                names_to = c("type", "size"),
+#                values_to = "abundance", 
+#                names_sep = 1) %>% 
+#   mutate(size = factor(size, levels = c("small", "medium", "large")),
+#          type = ifelse(type == "p", "Predicted", "Observed"))
+# 
+# 
+# agg_catch_plot <- testing_abundances %>% 
+#   ggplot(aes(size, abundance, fill = type)) +
+#   geom_col(position = "dodge") +
+#   facet_grid(season ~ area) +
+#   labs(y = "Total Abundance - Testing Data", x = NULL) +
+#   scale_fill_gmri(palette = "mixed") +
+#   guides(fill = guide_legend("")) +
+#   theme()
+# 
+# 
+# agg_catch_plot
 
 #Export plot
 ggsave(agg_catch_plot, 
@@ -871,6 +1027,13 @@ ggsave(agg_catch_plot,
 ####  Load Model Prediction Data  ####
 # datdat  <- read_csv(here("predictions20132015.csv"), col_types = cols(), guess_max = 1e6)
 mod_summs_sf <- strata_summs(datdat)
+
+
+#Multiply catch/area by stratum area to get total biomass in stratum
+#also want stratum area
+strataarea <- select(strataarea, stratum, area) %>% mutate(stratum = as.character(stratum))
+mod_summs_sf <- mod_summs_sf %>% left_join(strataarea, by = c("STRATA" = "stratum")) %>% 
+  mutate(stratum_abundance = abundance * area)
 ```
 
 
@@ -879,19 +1042,6 @@ mod_summs_sf <- strata_summs(datdat)
 ```{r}
 stratum_plots <- obs_pred_plot(mod_summs_sf, size_facets = FALSE)
 
-
-# Save Plots
-if(params$save_maps == TRUE) {
-  ggsave(stratum_plots$small, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "small.png")),
-         device = "png")
-  ggsave(stratum_plots$medium, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "medium.png")),
-         device = "png")
-  ggsave(stratum_plots$large, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "large.png")),
-         device = "png")
-}
 
 ```
 
@@ -919,20 +1069,6 @@ stratum_plots$large
 ```{r}
 strata_diff_plots <- strata_diffs_plot(mod_summs_sf, size_facets = FALSE)
 
-
-# Save Plots
-if(params$save_maps == TRUE) {
-  ggsave(strata_diff_plots$small, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "small.png")),
-         device = "png")
-  ggsave(strata_diff_plots$medium, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "medium.png")),
-         device = "png")
-  ggsave(strata_diff_plots$large, 
-         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "large.png")),
-         device = "png")
-}
-
 ```
 
 
@@ -953,13 +1089,39 @@ strata_diff_plots$medium
 
 ```{r}
 strata_diff_plots$large
+
+
+# Save Plots
+if(params$save_maps == TRUE) {
+  #Observed and Predicted Values
+  ggsave(stratum_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(stratum_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(stratum_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "obs_pred", str_c(mod_details, "large.png")),
+         device = "png")
+  #Difference Plots
+  ggsave(strata_diff_plots$small, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "small.png")),
+         device = "png")
+  ggsave(strata_diff_plots$medium, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "medium.png")),
+         device = "png")
+  ggsave(strata_diff_plots$large, 
+         filename = here("Code", "multi_species_mods", "strata_plots", "diffs", str_c(mod_details, "large.png")),
+         device = "png")
+}
+
 ```
 
 
 
 ## 4. Variable importance plots
 
-```{r}
+```{r, eval = FALSE}
 # from https://bgreenwell.github.io/pdp/articles/pdp-example-tensorflow.html
 
 # vip randomly permutes the values of each feature and records the drop in training performance

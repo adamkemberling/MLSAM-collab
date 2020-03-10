@@ -6,7 +6,7 @@ output: html_document
 editor_options: 
   chunk_output_type: console
 params:
-  pc: TRUE
+  pc: FALSE
   user_name: "mbarajas"
   common_name: "atlantic cod"
 ---
@@ -219,7 +219,7 @@ std<-apply(fish[training_index,-1],2,sd)
 fish[,2:ncol(fish)]<-scale(fish[,-1],center=mean,scale=std)
 
 # empty matrix
-fish_cube<-array(NaN,c(length(start_indexes),max_len+1,ncol(fish)-1))
+fish_cube<-array(NaN,c(length(start_indexes), max_len+1, ncol(fish)-1))
 
 # fill cube with data sequences
 for(j in 1:(ncol(fish)-1)){

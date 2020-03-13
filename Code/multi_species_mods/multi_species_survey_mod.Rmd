@@ -1,5 +1,5 @@
 ---
-title: "General Groundfish Survey FFNN Size-Class Model"
+title: "General Groundfish Survey ANN Size-Class Model"
 author: "Adam Kemberling"
 date: "`r Sys.Date()`"
 output: 
@@ -388,7 +388,7 @@ trawltemp <- trawltemp %>%
 
 ## 1. Format and Transform Data
 
-Format factor data, log-transform dependent vars.
+Format factor data, log-transform dependent vars. Flag events with abnormally high catches for each size-class, report how many observations share the same predictors (i.e. how uniquely identifiable are the conditions surrounding large catch events). 
 
 ```{r}
 
@@ -512,8 +512,38 @@ survey_data <- survey_data %>%
     )
   )
 
+####  Dig into resampling data  ####
+
+#What data is resampled in original units
+resampled_df <- survey_data %>% 
+  select(big_catch, nsmall, nmedium, nlarge,
+         SEASON, SVVESSEL, tod, lunar_phase, AREA, stratum, anom, anom10) %>% 
+  mutate(nsmall = (exp(nsmall) - 1) * 0.0384,
+         nmedium = (exp(nmedium) - 1) * 0.0384,
+         nlarge = (exp(nlarge) - 1) * 0.0384)
+
+resampled_splits <- resampled_df %>% filter(big_catch != "typical_low") %>% 
+  split(.$big_catch)
 
 
+resampling_statement <- resampled_splits %>% map_dfr(function(big_catch_split){
+  
+  n_big_catches <- nrow(big_catch_split)
+  same_cond <- inner_join(resampled_df, big_catch_split, 
+                          by = c("SEASON", "SVVESSEL", "tod", "lunar_phase", "AREA", 
+                                 "stratum", "anom", "anom10"))
+  n_same_cond <- nrow(same_cond)
+  n_low_catch <- n_same_cond - n_big_catches
+  
+  statement <- str_c(n_low_catch, " low catch stations had the same exact predictors as the ",
+                     n_big_catches, " stations of excessively high catch we resampled.")
+  
+  return(tibble("Size" = NA, "Resampling Statement" = statement))
+  
+})
+
+resampling_statement$Size <- factor(c("Large", "Medium", "Small"), levels = c("Small", "Medium", "Large"))
+resampling_statement %>% arrange(Size) %>% knitr::kable()
 ```
 
 ## 2. Split Training and Testing Set
@@ -868,14 +898,14 @@ model_summs <- datdat %>%
     omedium = mean(observed_medium, na.rm = T),
     olarge  = mean(observed_large, na.rm = T)
   ) %>%
-  pivot_longer(cols=4:9,names_to=c("type","size"),values_to="abundance",names_sep=1) %>% 
+  pivot_longer(cols = 4:9, names_to = c("type", "size"), values_to = "abundance", names_sep = 1) %>% 
   mutate(size = factor(size, levels = c("small", "medium", "large")),
          type = ifelse(type == "p", "Predicted", "Observed"))
 
 
 if(params$save_agg_catch == TRUE) {
-  write_csv(model_summs, here::here("Code", "multi_species_mods", "seasonal_model_inputs", 
-                                    str_c(mod_details, ".csv")),
+  write_csv(model_summs, 
+            here::here("Code", "multi_species_mods", "seasonal_model_inputs", str_c(mod_details, ".csv")),
             col_names = T)
 }
 ```

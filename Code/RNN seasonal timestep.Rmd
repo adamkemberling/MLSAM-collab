@@ -14,9 +14,11 @@ params:
 ```{r,warning=FALSE,message=FALSE}
 # Libraries
 library(tidyverse)
+library(lubridate)
 library(here)
 library(keras)
 library(gmRi)
+library(ggpmisc)
 
 #Set appropriate path to box
 if(params$pc == TRUE) {
@@ -43,10 +45,10 @@ theme_set(theme_bw())
 
 ```{r}
 
-# time series of abundance as catch/standard tow
+# time series of abundance as mean abundance per square km
 # output of survey model grouped on year, area, season
 # calculated average observed and predicted of each size class
-survey<-read_csv(str_c(mills_path,"Projects/NSF_CAccel/Data/atlantic_cod2060.csv"),col_types=cols())
+survey<-read_csv(str_c(mills_path,"Projects/NSF_CAccel/Data/atlantic_cod2060_v2.csv"),col_types=cols())
 
 # reshape to wide format
 survey<-survey%>%pivot_wider(names_from=c(area,season,size,type),values_from=abundance,values_fill=list(abundance=0))
@@ -193,7 +195,7 @@ seasondat%>%
                values_to="value")%>%
   ggplot(aes(x=Date,y=value))+
   geom_line(size=1)+
-  labs(y="catch / standard tow")+
+  labs(y="mean abundance per square km")+
   facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
 
 ```
@@ -309,18 +311,30 @@ learningcurves <- model %>% fit(x = features_train,  y=list(gom_sml=labels_train
 
 # plot learning curves
 plot(learningcurves)
+
+# backtransform training mean squared error
+train_metrics<-as.data.frame(learningcurves)%>%
+  filter(epoch==learningcurves$params$epochs)%>%
+  select(metric,value)
+train_metrics<-train_metrics[label+1,]
+train_eval<-(train_metrics$value*std[label])+mean[label]
+train_eval
 ```
 
-# predict and plot
+# predict
 
 ```{r}
 # model performance on test set
-evaluate(model,features_test,y=list(gom_sml=labels_test[,1],
-                                    gom_med=labels_test[,2],
-                                    gom_lrg=labels_test[,3],
-                                    gb_sml=labels_test[,4],
-                                    gb_med=labels_test[,5],
-                                    gb_lrg=labels_test[,6]),verbose=0)
+eval<-evaluate(model,features_test,y=list(gom_sml=labels_test[,1],
+                                          gom_med=labels_test[,2],
+                                          gom_lrg=labels_test[,3],
+                                          gb_sml=labels_test[,4],
+                                          gb_med=labels_test[,5],
+                                          gb_lrg=labels_test[,6]),verbose=0)
+
+# backtransform testing mean squared error
+test_eval<-((as.numeric(eval[label+1]))*std[label])+mean[label]
+test_eval
 
 # make predictions
 preds<-model%>%predict(features_test)
@@ -346,10 +360,39 @@ res<-left_join(res,preds,"Date")
 res<-res%>%pivot_longer(cols=2:13,names_to=c("area","size","type1","type2"),
                         names_pattern="(.*)_(.*)_(.*)_(.*)",
                         values_to="value")
+```
 
 # plot
+
+```{r, fig.width=7,fig.height=6}
+
+# plot predictions
 res%>%
+  filter(year(Date)>2007)%>%
   ggplot(aes(x=Date,y=value,color=type2))+
   geom_line(size=1)+
+  labs(x="Year",y="mean abundance per square km")+
+  scale_color_discrete(name=NULL)+
   facet_grid(factor(area,levels=c("gom","gb"))+factor(size,levels=c("sml","med","lrg"))~.,scales="free_y")
+
+```
+
+```{r,fig.width=8.5,fig.height=3.1}
+
+res$size<-factor(res$size,levels=c("sml","med","lrg"))
+
+# scatter plots of predictions
+formula<-y~x
+res%>%
+  filter(year(Date)>2010)%>%
+  select(c(Date,area,size,type2,value))%>%
+  pivot_wider(names_from=type2,values_from=value)%>%
+  ggplot(aes(x=obs,y=pred,color=size,shape=area))+
+  geom_point(size=2)+
+  stat_poly_eq(formula=formula,rr.digits=2,parse=TRUE,label.y="bottom",label.x="right")+
+  facet_wrap(.~size,scales="free")+
+  scale_shape_manual(values=c(19,24))+
+  #geom_abline(slope=1,intercept=0)+
+  labs(x="observed mean abundance per square km",y="predicted mean abundance per square km")
+
 ```

@@ -41,7 +41,9 @@ strata_summs <- function(mod_preds) {
     
   
   ####  Join with Strata Geometries  ####
-  mod_summs_sf <- survey_strata %>% inner_join(mod_summs, by = "STRATA")
+  mod_summs_sf <- survey_strata %>% 
+    inner_join(mod_summs, by = "STRATA") %>% 
+    mutate(STRATA = as.character(STRATA))
   
   return(mod_summs_sf)
   
@@ -53,14 +55,21 @@ strata_summs <- function(mod_preds) {
 ####  Observed and Predicted Plots  ####
 obs_pred_plot <- function(mod_summs_sf, size_facets = TRUE) {
   #Leave out the differences, plot
-  data_facets <-  mod_summs_sf %>% filter(type != "obs - pred")
+  data_facets <-  mod_summs_sf %>% filter(type != "obs - pred") %>% 
+    mutate(stratum_abundance = stratum_abundance / 1000)
   
   if(size_facets == TRUE) {
     plot_out <- ggplot(data_facets) +
-        geom_sf(aes(fill = abundance), color = "gray50", size = 0.05) +
+        #geom_sf(aes(fill = abundance), color = "gray50", size = 0.05) +
+        #scale_fill_distiller(palette = "RdBu") +
+        geom_sf(aes(fill = stratum_abundance), color = "gray50", size = 0.05) +
         scale_fill_distiller(palette = "RdBu") +
         facet_wrap(type ~ size) +
-        guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = 10)) +
+        guides(fill = guide_colourbar(
+          title = expression(paste("Stratum Abundance (n / 10" ^3,")")), 
+          title.position = "top", 
+          title.hjust = 0.5, 
+          barwidth = 10)) +
         theme(legend.position = "bottom")
     
     return(plot_out)
@@ -71,10 +80,16 @@ obs_pred_plot <- function(mod_summs_sf, size_facets = TRUE) {
       split(.$size) %>%
       map(function(x) {
         plot_out <- ggplot(x) +
-             geom_sf(aes(fill = abundance), color = "gray50", size = 0.05) +
+             #geom_sf(aes(fill = abundance), color = "gray50", size = 0.05) +
+             #scale_fill_distiller(palette = "RdBu") +
+             geom_sf(aes(fill = stratum_abundance), color = "gray50", size = 0.05) +
              scale_fill_distiller(palette = "RdBu") +
              facet_wrap(type ~ size) +
-             guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = 10)) +
+             guides(fill = guide_colourbar(
+               title = expression(paste("Stratum Abundance (n / 10" ^3,")")), 
+               title.position = "top", 
+               title.hjust = 0.5, 
+               barwidth = 10)) +
              theme(legend.position = "bottom")
         
       })
@@ -92,7 +107,10 @@ strata_diffs_plot <- function(mod_summs_sf, size_facets = TRUE) {
   
   mod_diffs <- mod_summs_sf %>% 
     filter(type == "obs - pred") %>% 
-    mutate("prediction difference" = abundance)
+    mutate(
+      #"prediction difference" = abundance,
+      "prediction difference" = stratum_abundance / 1000
+      )
   
   
   if(size_facets == TRUE) {
@@ -104,7 +122,11 @@ strata_diffs_plot <- function(mod_summs_sf, size_facets = TRUE) {
         geom_sf(aes(fill= `prediction difference`), color = NA) +
         scale_fill_distiller(palette = "RdBu", limit = limit) +
         facet_grid(type ~ size) +
-        guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = 10)) +
+        guides(fill = guide_colourbar(
+          title = expression(paste("Observed - Predicted (n / 10" ^3,")")), 
+          title.position = "top", 
+          title.hjust = 0.5, 
+          barwidth = 10)) +
         theme(legend.position = "bottom")
     
     return(plot_out)
@@ -122,7 +144,11 @@ strata_diffs_plot <- function(mod_summs_sf, size_facets = TRUE) {
           geom_sf(aes(fill= `prediction difference`), color = NA) +
           scale_fill_distiller(palette = "RdBu", limit = limit) +
           facet_grid(type ~ size) +
-          guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5, barwidth = 10)) +
+          guides(fill = guide_colourbar(
+            title = expression(paste("Observed - Predicted (n / 10" ^3,")")), 
+            title.position = "top", 
+            title.hjust = 0.5, 
+            barwidth = 10)) +
           theme(legend.position = "bottom")
         
         return(plot_out)
